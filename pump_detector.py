@@ -120,8 +120,8 @@ class PumpDetector:
             logger.warning(f"💹 {symbol}: Volume spike={volume_spike:.2f}x (мин={self.min_volume_spike}x), avg={avg_volume:.2f}, recent={recent_volume:.2f}")
         
         if volume_spike < self.min_volume_spike:
-            if is_debug:
-                logger.warning(f"❌ {symbol}: Volume spike {volume_spike:.2f} < {self.min_volume_spike}")
+            if is_debug or price_increase_pct >= 10.0:  # Логируем сильные движения
+                logger.warning(f"❌ {symbol}: Рост +{price_increase_pct:.1f}%, но всплеск объёма {volume_spike:.2f} < {self.min_volume_spike}")
             return None
         
         # Проверяем минимальный объём в USD
@@ -135,8 +135,8 @@ class PumpDetector:
             logger.info(f"💰 {symbol}: Volume USD={volume_usd:.0f} (мин={self.min_volume_usd})")
         
         if volume_usd < self.min_volume_usd:
-            if is_debug:
-                logger.info(f"❌ {symbol}: Volume USD {volume_usd:.0f} < {self.min_volume_usd}")
+            if is_debug or price_increase_pct >= 10.0:
+                 logger.warning(f"❌ {symbol}: Рост +{price_increase_pct:.1f}%, но объём ${volume_usd:.0f} < ${self.min_volume_usd}")
             return None
         
         # Памп обнаружен!
