@@ -65,6 +65,12 @@ class PumpDetector:
                         'DOGE_USDT', 'ADA_USDT', 'MATIC_USDT', 'DOT_USDT', 'LINK_USDT']
         is_debug = symbol in debug_symbols
         
+        # 🔥 DIAGNOSTIC: Log data accumulation for EVERY 100th call
+        import random
+        if random.random() < 0.001:  # 0.1% chance to log
+            count = len(self.price_history.get(symbol, []))
+            logger.warning(f"🔬 DIAG {symbol}: {count} точек данных")
+        
         if symbol not in self.price_history or len(self.price_history[symbol]) < 3:
             if is_debug:
                 count = len(self.price_history.get(symbol, []))
@@ -94,8 +100,13 @@ class PumpDetector:
         # Рассчитываем рост
         price_increase_pct = ((price_peak - price_start) / price_start) * 100
         
-        # 🔥 АГРЕССИВНОЕ ЛОГИРОВАНИЕ: Логируем ВСЕ монеты с ростом >= 5%
-        if price_increase_pct >= 5.0:
+        # 🔥 СУПЕР-ДИАГНОСТИКА: Логируем КАЖДЫЙ расчёт (с вероятностью 0.5%)
+        if random.random() < 0.005:  # 0.5% шанс
+            logger.warning(f"🔬 CALC {symbol}: Рост={price_increase_pct:.2f}% | "
+                          f"{price_start:.8f}→{price_peak:.8f} | {len(recent_data)} точек")
+        
+        # 🔥 АГРЕССИВНОЕ ЛОГИРОВАНИЕ: Логируем ВСЕ монеты с ростом >= 2%
+        if price_increase_pct >= 2.0:
             logger.warning(f"📊 {symbol}: Рост={price_increase_pct:.1f}% за {self.timeframe}мин | "
                           f"Цена: {price_start:.6f}→{price_peak:.6f} | Точек={len(recent_data)}")
         elif is_debug:
