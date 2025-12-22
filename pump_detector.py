@@ -94,15 +94,19 @@ class PumpDetector:
         # Рассчитываем рост
         price_increase_pct = ((price_peak - price_start) / price_start) * 100
         
-        # ВСЕГДА логируем для debug символов
-        if is_debug:
-            logger.warning(f"📊 {symbol}: Рост={price_increase_pct:.3f}% (мин={self.min_increase}%), "
-                        f"Цена: {price_start:.6f}→{price_peak:.6f}, Точек={len(recent_data)}")
+        # 🔥 АГРЕССИВНОЕ ЛОГИРОВАНИЕ: Логируем ВСЕ монеты с ростом >= 5%
+        if price_increase_pct >= 5.0:
+            logger.warning(f"📊 {symbol}: Рост={price_increase_pct:.1f}% за {self.timeframe}мин | "
+                          f"Цена: {price_start:.6f}→{price_peak:.6f} | Точек={len(recent_data)}")
+        elif is_debug:
+            # Для debug символов логируем даже маленькие движения
+            logger.info(f"📊 {symbol}: Рост={price_increase_pct:.3f}% (мин={self.min_increase}%)")
 
         # Проверяем условия пампа
         if not (self.min_increase <= price_increase_pct <= self.max_increase):
-            if is_debug:
-                logger.warning(f"❌ {symbol}: Рост {price_increase_pct:.3f}% не в диапазоне [{self.min_increase}, {self.max_increase}]")
+            # Логируем отклонённые пампы с ростом >= 5%
+            if price_increase_pct >= 5.0:
+                logger.warning(f"⚠️ {symbol}: Рост +{price_increase_pct:.1f}% НЕ прошёл (нужно {self.min_increase}%-{self.max_increase}%)")
             return None
         
         # Проверяем всплеск объёма
