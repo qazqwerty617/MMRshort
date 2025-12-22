@@ -141,21 +141,18 @@ class RestPumpDetector:
         is_pump = False
         pump_type = ""
 
-        # 🔥 АГРЕССИВНОЕ ЛОГИРОВАНИЕ: >1% (по запросу)
-        if increase_pct >= 1.0:
-            logger.warning(f"📊 {symbol}: +{increase_pct:.2f}% за {time_diff_minutes:.1f}мин (пик {time_since_peak:.1f}мин назад)")
-
-        # Увеличиваем окно, чтобы видеть даже старые пампы
-        if time_since_peak > 30.0:
+        # Фильтр старых пампов: если пик был давно (> 1.5 мин назад), игнорируем
+        if time_since_peak > 1.5:
+             # logger.debug(f"📉 {symbol}: Пик был {time_since_peak:.1f} мин назад, игнорируем")
              return False, 0, 0, ""
 
-        # 1. Основная: >1% (или из конфига)
-        if increase_pct >= 1.0:
+        # 1. Основная: используем порог из конфига (self.min_pump_pct)
+        if increase_pct >= self.min_pump_pct:
             is_pump = True
             pump_type = "MASSIVE"
         
-        # 2. Быстрая: >1% за 5 мин
-        elif increase_pct >= 1.0 and time_diff_minutes <= 5.0:
+        # 2. Быстрая: >10% за 5 мин (импульс)
+        elif increase_pct >= 10.0 and time_diff_minutes <= 5.0:
             is_pump = True
             pump_type = "FAST_IMPULSE"
 
