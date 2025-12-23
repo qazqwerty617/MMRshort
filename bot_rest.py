@@ -613,6 +613,46 @@ class RestPumpDetector:
 """
         await update.message.reply_text(msg, parse_mode='Markdown')
 
+    async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /stats - статистика Win/Loss"""
+        stats = self.signal_tracker.get_statistics()
+        
+        # Основная статистика
+        msg = f"""
+📈 **Статистика сигналов**
+
+**Общий результат:**
+Всего сделок: {stats['total']}
+✅ Win: {stats['wins']} | ❌ Loss: {stats['losses']}
+Винрейт: **{stats['win_rate']:.1f}%**
+
+**Профит:**
+Средний профит: {stats['avg_profit']:+.2f}%
+Общий профит: {stats['total_profit']:+.2f}%
+Средний WIN: +{stats['avg_win']:.2f}%
+Средний LOSS: {stats['avg_loss']:.2f}%
+
+🔄 Активных отслеживаний: {stats['active_tracking']}
+"""
+        
+        # Лучшие монеты
+        if stats['best_coins']:
+            msg += "\n🏆 **Лучшие монеты:**\n"
+            for sym, profit, wins, losses in stats['best_coins'][:3]:
+                msg += f"• `{sym}` — {profit:+.1f}% ({wins}W/{losses}L)\n"
+        
+        # Худшие монеты
+        if stats['worst_coins'] and stats['total'] > 5:
+            msg += "\n💀 **Худшие монеты:**\n"
+            for sym, profit, wins, losses in stats['worst_coins'][:2]:
+                if profit < 0:
+                    msg += f"• `{sym}` — {profit:.1f}% ({wins}W/{losses}L)\n"
+        
+        if stats['total'] == 0:
+            msg = "📊 **Статистика пуста**\n\nСигналов пока не было или они ещё отслеживаются (нужно 60 мин после сигнала)."
+        
+        await update.message.reply_text(msg, parse_mode='Markdown')
+
     async def listing_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда /listing - календарь листингов"""
         status_msg = await update.message.reply_text("🔄 Загружаю данные о листингах...")
@@ -726,6 +766,7 @@ class RestPumpDetector:
         self.app = Application.builder().token(self.telegram_token).build()
         self.app.add_handler(CommandHandler("start", self.start_command))
         self.app.add_handler(CommandHandler("status", self.status_command))
+        self.app.add_handler(CommandHandler("stats", self.stats_command))
         self.app.add_handler(CommandHandler("listing", self.listing_command))
         self.app.add_handler(CommandHandler("test", self.test_command))
         
@@ -737,12 +778,15 @@ class RestPumpDetector:
         
         await self.app.bot.send_message(
             chat_id=self.chat_id,
-            text="🟢 **MMR TURBO запущен!**\n\n• Памп детекция: 1.5с\n• Листинг детекция: 30с",
+            text="🟢 **MMR TURBO запущен!**\n\n• Памп детекция: 1.5с\n• Листинг детекция: 30с\n• /stats - статистика",
             parse_mode='Markdown'
         )
         
         # Запускаем детектор листингов в фоне
         listing_task = asyncio.create_task(self.listing_detector.run())
+        
+        # Запускаем трекер сигналов в фоне
+        tracker_task = asyncio.create_task(self.signal_tracker.run())
         
         try:
             while True:

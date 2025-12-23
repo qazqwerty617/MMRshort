@@ -145,26 +145,57 @@ class SignalTracker:
             del self.active_signals[signal_id]
     
     def get_statistics(self) -> dict:
-        """Получить статистику по сигналам"""
+        """Получить полную статистику по сигналам"""
         if not self.signal_results:
-            return {'total': 0, 'wins': 0, 'losses': 0, 'win_rate': 0}
+            return {
+                'total': 0, 'wins': 0, 'losses': 0, 'win_rate': 0,
+                'avg_profit': 0, 'total_profit': 0,
+                'avg_win': 0, 'avg_loss': 0,
+                'best_coins': [], 'worst_coins': [],
+                'active_tracking': len(self.active_signals)
+            }
         
-        wins = sum(1 for s in self.signal_results if s.get('result') == 'win')
-        losses = sum(1 for s in self.signal_results if s.get('result') == 'loss')
-        total = wins + losses
+        wins = [s for s in self.signal_results if s.get('result') == 'win']
+        losses = [s for s in self.signal_results if s.get('result') == 'loss']
+        total = len(wins) + len(losses)
         
-        avg_profit = 0
-        if self.signal_results:
-            profits = [s.get('profit_pct', 0) for s in self.signal_results if s.get('profit_pct')]
-            if profits:
-                avg_profit = sum(profits) / len(profits)
+        # Средние значения
+        all_profits = [s.get('profit_pct', 0) for s in self.signal_results if s.get('profit_pct') is not None]
+        avg_profit = sum(all_profits) / len(all_profits) if all_profits else 0
+        total_profit = sum(all_profits)
+        
+        avg_win = sum(s.get('profit_pct', 0) for s in wins) / len(wins) if wins else 0
+        avg_loss = sum(s.get('profit_pct', 0) for s in losses) / len(losses) if losses else 0
+        
+        # Лучшие и худшие монеты
+        coin_stats = defaultdict(lambda: {'wins': 0, 'losses': 0, 'total_profit': 0})
+        for s in self.signal_results:
+            symbol = s.get('symbol', 'UNKNOWN')
+            result = s.get('result')
+            profit = s.get('profit_pct', 0)
+            
+            if result == 'win':
+                coin_stats[symbol]['wins'] += 1
+            elif result == 'loss':
+                coin_stats[symbol]['losses'] += 1
+            coin_stats[symbol]['total_profit'] += profit
+        
+        # Сортируем по профиту
+        sorted_coins = sorted(coin_stats.items(), key=lambda x: x[1]['total_profit'], reverse=True)
+        best_coins = [(sym, data['total_profit'], data['wins'], data['losses']) for sym, data in sorted_coins[:5]]
+        worst_coins = [(sym, data['total_profit'], data['wins'], data['losses']) for sym, data in sorted_coins[-3:]]
         
         return {
             'total': total,
-            'wins': wins,
-            'losses': losses,
-            'win_rate': (wins / total * 100) if total > 0 else 0,
+            'wins': len(wins),
+            'losses': len(losses),
+            'win_rate': (len(wins) / total * 100) if total > 0 else 0,
             'avg_profit': avg_profit,
+            'total_profit': total_profit,
+            'avg_win': avg_win,
+            'avg_loss': avg_loss,
+            'best_coins': best_coins,
+            'worst_coins': worst_coins,
             'active_tracking': len(self.active_signals)
         }
     
