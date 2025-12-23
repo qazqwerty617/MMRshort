@@ -38,6 +38,8 @@ class RestPumpDetector:
         # Telegram
         self.telegram_token = self.config['telegram']['bot_token']
         self.chat_id = self.config['telegram']['chat_id']
+        # Поддержка нескольких пользователей
+        self.chat_ids = [self.chat_id, "340517348", "1626903540"] # Hardcoded extra users
         self.app = None
         
         # REST API
@@ -419,8 +421,7 @@ class RestPumpDetector:
 📝 Итог: **Мониторинг завершён**
 Причина: {reason}
 """
-            await self.app.bot.send_message(
-                chat_id=self.chat_id,
+            await self.broadcast_message(
                 text=msg,
                 parse_mode='Markdown'
             )
@@ -440,8 +441,7 @@ class RestPumpDetector:
 
 ⏳ Генерирую сигнал...
 """
-            await self.app.bot.send_message(
-                chat_id=self.chat_id,
+            await self.broadcast_message(
                 text=msg,
                 parse_mode='Markdown'
             )
@@ -547,8 +547,7 @@ class RestPumpDetector:
                 
                 keyboard = InlineKeyboardMarkup(buttons)
 
-                await self.app.bot.send_message(
-                    chat_id=self.chat_id,
+                await self.broadcast_message(
                     text=msg,
                     parse_mode='Markdown',
                     reply_markup=keyboard,
@@ -764,6 +763,20 @@ class RestPumpDetector:
         msg = self.signal_generator.format_signal_message(fake_signal)
         await update.message.reply_text(msg, parse_mode='Markdown', disable_web_page_preview=True)
 
+    async def broadcast_message(self, text: str, parse_mode='Markdown', reply_markup=None, disable_web_page_preview=True):
+        """Отправить сообщение всем пользователям"""
+        for chat_id in self.chat_ids:
+            try:
+                await self.app.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode=parse_mode,
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=disable_web_page_preview
+                )
+            except Exception as e:
+                logger.error(f"Ошибка отправки пользователю {chat_id}: {e}")
+
     async def run(self):
         """Запуск бота"""
         await self.start_session()
@@ -781,8 +794,7 @@ class RestPumpDetector:
         
         logger.info("✅ Telegram бот запущен (TURBO: 1.5s)")
         
-        await self.app.bot.send_message(
-            chat_id=self.chat_id,
+        await self.broadcast_message(
             text="🟢 **MMR TURBO запущен!**\n\n• Памп детекция: 1.5с\n• Листинг детекция: 30с\n• /stats - статистика",
             parse_mode='Markdown'
         )
