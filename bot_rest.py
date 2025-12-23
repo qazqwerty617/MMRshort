@@ -219,8 +219,13 @@ class RestPumpDetector:
             return False, 0, 0, ""
         
         increase_pct = ((price_peak - price_start) / price_start) * 100
-        time_diff_seconds = (recent[-1][0] - recent[0][0]) / 1000
+        
+        # Точное время роста: от начала окна (price_start) до пика (price_peak)
+        peak_timestamp = peak_snapshot[0]
+        start_timestamp = recent[0][0]
+        time_diff_seconds = (peak_timestamp - start_timestamp) / 1000
         time_diff_minutes = time_diff_seconds / 60
+        
         if time_diff_minutes <= 0:
             time_diff_minutes = 0.1
 
