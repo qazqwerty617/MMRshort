@@ -60,19 +60,27 @@ class DexAnalyzer:
                             return None
                         
                         price_usd = float(best_pair.get('priceUsd', 0))
+                        liquidity = float(best_pair.get('liquidity', {}).get('usd', 0) or 0)
+                        
                         if price_usd == 0:
+                            return None
+                        
+                        # ФИЛЬТР: минимум $100k ликвидности для надёжности данных
+                        MIN_LIQUIDITY_USD = 100000
+                        if liquidity < MIN_LIQUIDITY_USD:
+                            logger.warning(f"⚠️ DEX {base_token}: ликвидность ${liquidity:,.0f} < ${MIN_LIQUIDITY_USD:,} (ненадёжно, пропускаем)")
                             return None
                         
                         result = {
                             "price": price_usd,
                             "dex_name": best_pair.get('dexId', 'unknown'),
-                            "liquidity": float(best_pair.get('liquidity', {}).get('usd', 0) or 0),
+                            "liquidity": liquidity,
                             "volume_24h": float(best_pair.get('volume', {}).get('h24', 0) or 0),
                             "chain": best_pair.get('chainId', 'unknown'),
                             "pair_address": best_pair.get('pairAddress', '')
                         }
                         
-                        logger.info(f"✅ DEX {base_token}: ${price_usd:.6f} на {result['dex_name']} (ликв: ${result['liquidity']:,.0f})")
+                        logger.info(f"✅ DEX {base_token}: ${price_usd:.6f} на {result['dex_name']} (ликв: ${liquidity:,.0f})")
                         return result
         
         except asyncio.TimeoutError:

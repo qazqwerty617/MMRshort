@@ -12,6 +12,8 @@ from coin_profiler import CoinProfiler
 from funding_rate_analyzer import FundingRateAnalyzer
 from multi_timeframe_analyzer import MultiTimeframeAnalyzer
 from dex_analyzer import DexAnalyzer
+from open_interest_analyzer import OpenInterestAnalyzer
+from historical_pattern_analyzer import HistoricalPatternAnalyzer
 from logger import get_logger
 
 logger = get_logger()
@@ -38,11 +40,13 @@ class SignalGenerator:
         self.volume_analyzer = VolumeAnalyzer(config['short_entry'])
         self.orderbook_analyzer = OrderbookAnalyzer(config['short_entry'])
         self.mtf_analyzer = MultiTimeframeAnalyzer()
-        self.dex_analyzer = DexAnalyzer()  # DEX анализатор
+        self.dex_analyzer = DexAnalyzer()
+        self.oi_analyzer = OpenInterestAnalyzer()  # Open Interest
+        self.pattern_analyzer = HistoricalPatternAnalyzer()  # Исторические паттерны
         
         # Кэш для предыдущих ордербуков (для whale tracking)
         self.previous_orderbooks = {}
-        logger.info("✅ Signal Generator v2.0 (No Limits) loaded")
+        logger.info("✅ Signal Generator v3.0 (OI + Patterns) loaded")
     
     async def generate_signal(self, symbol: str, pump_data: Dict,
                              price_history: List[float],
@@ -65,7 +69,12 @@ class SignalGenerator:
         Returns:
             Данные сигнала или None
         """
-        logger.info(f"🔍 {symbol}: Начинаю анализ для SHORT сигнала (памп: +{pump_data['increase_pct']:.2f}%)")
+        logger.info(f"🔍 {symbol}: Начинаю анализ для SHORT (памп: +{pump_data['increase_pct']:.2f}%)")
+        
+        # 🔥 СТРОГИЕ ФИЛЬТРЫ ДЛЯ ЛУЧШИХ ШОРТОВ
+        MIN_RSI_FOR_SHORT = 65  # RSI должен быть высоким
+        MIN_DEX_SPREAD_PCT = 5.0  # CEX должна быть дороже DEX на 5%+
+        MAX_DISTANCE_FROM_PEAK_PCT = 10  # Цена не должна упасть >10% от пика
         
         if len(price_history) < 2:
             logger.warning(f"❌ {symbol}: Критически мало данных (price_history={len(price_history)})")
@@ -205,14 +214,42 @@ class SignalGenerator:
             whale_score = whale_data.get('whale_score', 0)
             bonus_score += (whale_score / 10) * 1.0
         
-        # 🔥 DEX СПРЕД - МОЩНЫЙ БОНУС (увеличен для быстрых/массивных пампов)!
+        # 📊 OPEN INTEREST анализ
+        oi_result = await self.oi_analyzer.analyze(symbol)
+        oi_score = oi_result.get('oi_score', 5.0)
+        if oi_score > 6:  # OI падает - лонги закрываются
+            oi_bonus = (oi_score - 5) / 5 * 1.5  # До +1.5
+            bonus_score += oi_bonus
+            logger.info(f"📉 {symbol}: OI бонус +{oi_bonus:.1f}")
+        elif oi_score < 4:  # OI растёт - опасно!
+            oi_penalty = (4 - oi_score) / 4 * 2.0  # До -2.0
+            bonus_score -= oi_penalty
+            logger.warning(f"⚠️ {symbol}: OI пенальти -{oi_penalty:.1f} (много новых лонгов!)")
+        
+        # 📜 ИСТОРИЧЕСКИЙ ПАТТЕРН монеты
+        pattern_result = self.pattern_analyzer.analyze(symbol)
+        pattern_score = pattern_result.get('pattern_score', 5.0)
+        pattern_type = pattern_result.get('pattern', 'UNKNOWN')
+        
+        if pattern_type == 'V_SHAPE':
+            # Монета обычно восстанавливается - НЕ ШОРТИТЬ!
+            bonus_score -= 3.0
+            logger.warning(f"⚠️ {symbol}: V-SHAPE монета - пенальти -3.0!")
+        elif pattern_type == 'SLOW_BLEED':
+            bonus_score += 1.5
+            logger.info(f"✅ {symbol}: SLOW_BLEED - бонус +1.5")
+        elif pattern_type == 'L_SHAPE':
+            bonus_score += 1.0
+            logger.info(f"✅ {symbol}: L_SHAPE - бонус +1.0")
+        
+        # 🔥 DEX СПРЕД - МОЩНЫЙ БОНУС
         if dex_score > 0:
             if pump_type in ['MASSIVE', 'FAST_IMPULSE']:
-                dex_bonus = (dex_score / 10) * 4.0  # До +4.0 для быстрых пампов!
-                logger.warning(f"💎💎 {symbol}: DEX бонус +{dex_bonus:.1f} к качеству (приоритетный режим)!")
+                dex_bonus = (dex_score / 10) * 4.0
+                logger.warning(f"💎💎 {symbol}: DEX бонус +{dex_bonus:.1f} (приоритетный)!")
             else:
-                dex_bonus = (dex_score / 10) * 2.0  # До +2.0 для обычных
-                logger.warning(f"💎 {symbol}: DEX бонус +{dex_bonus:.1f} к качеству!")
+                dex_bonus = (dex_score / 10) * 2.0
+                logger.warning(f"💎 {symbol}: DEX бонус +{dex_bonus:.1f}!")
             bonus_score += dex_bonus
         
         quality_score = base_score + bonus_score
@@ -225,6 +262,28 @@ class SignalGenerator:
         if quality_score < self.config['min_quality_score']:
             logger.warning(f"❌ {symbol}: Качество {quality_score:.2f} < минимум {self.config['min_quality_score']:.1f}")
             return None
+        
+        # 🔥 СТРОГИЕ ПРОВЕРКИ ДЛЯ ЛУЧШИХ ШОРТОВ:
+        
+        # 1) RSI должен быть высоким
+        if rsi < MIN_RSI_FOR_SHORT:
+            logger.warning(f"❌ {symbol}: RSI {rsi:.0f} < {MIN_RSI_FOR_SHORT} (недостаточно перекуплен)")
+            return None
+        
+        # 2) DEX спред - только информация (данные часто неточны)\r\n        # if dex_spread_data and dex_spread_data.get('spread_pct', 0) < MIN_DEX_SPREAD_PCT:\r\n        #     logger.warning(f\"❌ {symbol}: DEX спред...\")\r\n        #     return None
+        
+        # 3) Цена должна начать откат от пика (подтверждение разворота)
+        peak_price = pump_data.get('price_peak', current_price)
+        distance_from_peak = ((peak_price - current_price) / peak_price) * 100
+        
+        if distance_from_peak > MAX_DISTANCE_FROM_PEAK_PCT:
+            logger.warning(f"❌ {symbol}: Цена уже упала на {distance_from_peak:.1f}% от пика (поздно входить)")
+            return None
+        elif distance_from_peak < 1:
+            logger.info(f"⏳ {symbol}: Цена ещё на пике, ждём откат для ТВХ...")
+            return None
+        else:
+            logger.info(f"✅ {symbol}: Откат {distance_from_peak:.1f}% от пика - хорошая ТВХ!")
         
         # 9. Определяем точку входа
         entry_price = resistance_price if resistance_price else current_price

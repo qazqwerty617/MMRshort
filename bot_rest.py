@@ -15,6 +15,8 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from database import Database
 from signal_generator import SignalGenerator
 from coin_profiler import CoinProfiler
+from mexc_scraper import ListingDetector
+from signal_tracker import SignalTracker
 from logger import setup_logging, get_logger
 
 logger = setup_logging()
@@ -68,15 +70,84 @@ class RestPumpDetector:
         # Параметры детекции
         self.min_pump_pct = self.config['pump_detection']['min_price_increase_pct']
         self.timeframe_minutes = self.config['pump_detection']['timeframe_minutes']
-        self.scan_interval = 1.5  # TURBO: 1.5 секунды
+        self.scan_interval = 1.5
         
-        logger.info("🔄 REST Pump Detector инициализирован (TURBO mode)")
+        
+        # Детектор новых листингов
+        self.listing_detector = ListingDetector(on_new_listing=self._on_new_listing)
+        
+        # Трекер сигналов (Win/Loss)
+        self.signal_tracker = SignalTracker()
+        
+        # Связываем результаты с обучением паттернов
+        if hasattr(self.signal_generator, 'pattern_analyzer'):
+            self.signal_tracker.on_result_callback = self.signal_generator.pattern_analyzer.record_signal_result
+        
+        # Callback для отправки результата в Telegram
+        self.signal_tracker.on_notification_callback = self._on_signal_result
+        
+        logger.info("🔄 REST Detector + Listing + Signal Tracker инициализирован")
     
     async def start_session(self):
         """Инициализировать persistent HTTP сессию"""
         if not self.session:
             self.session = aiohttp.ClientSession(connector=self.connector)
-            logger.info("🌐 HTTP сессия создана (persistent)")
+            logger.info("🌐 HTTP сессия создана")
+    
+    async def _on_new_listing(self, symbol: str, contract_data: dict):
+        """Callback при обнаружении нового листинга"""
+        try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            
+            base_coin = contract_data.get('baseCoin', symbol.replace('_USDT', ''))
+            max_lev = contract_data.get('maxLeverage', 0)
+            
+            msg = f"""
+🚀🚀🚀 **НОВЫЙ ЛИСТИНГ ФЬЮЧЕРСА!**
+
+**Пара:** `{symbol}`
+**Монета:** {base_coin}
+**Плечо:** до x{max_lev}
+
+⚡ Только что добавлен на MEXC Futures!
+"""
+            
+            mexc_url = f"https://futures.mexc.com/exchange/{symbol}?type=linear_swap"
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📈 Открыть на MEXC", url=mexc_url)]
+            ])
+            
+            await self.app.bot.send_message(
+                chat_id=self.chat_id,
+                text=msg,
+                parse_mode='Markdown',
+                reply_markup=keyboard
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка уведомления о листинге: {e}")
+
+    async def _on_signal_result(self, signal_data: dict):
+        """Callback: результат отработки сигнала"""
+        try:
+            symbol = signal_data['symbol']
+            result = signal_data.get('result')  # 'win' / 'loss'
+            profit = signal_data.get('profit_pct', 0)
+            entry = signal_data['entry_price']
+            
+            if result == 'win':
+                msg = f"✅ **WIN {symbol}**\n\nВход: `{entry:.8f}`\nПрофит: **+{profit:.2f}%** 🤑"
+            else:
+                msg = f"❌ **LOSS {symbol}**\n\nВход: `{entry:.8f}`\nУбыток: {profit:.2f}%"
+                
+            await self.app.bot.send_message(
+                chat_id=self.chat_id,
+                text=msg,
+                parse_mode='Markdown'
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка отправки результата: {e}")
     
     async def close_session(self):
         """Закрыть HTTP сессию"""
@@ -474,6 +545,15 @@ class RestPumpDetector:
                         factors=signal['factors'],
                         weights=signal['weights']
                     )
+                    
+                    # Регистрируем в трекере результатов
+                    self.signal_tracker.add_signal(
+                        symbol=symbol,
+                        entry_price=signal['entry_price'],
+                        peak_price=pump_data['price_peak'],
+                        pump_pct=pump_data['increase_pct']
+                    )
+                    
                 except Exception as db_err:
                     logger.warning(f"⚠️ Ошибка БД: {db_err}")
                 
@@ -513,67 +593,26 @@ class RestPumpDetector:
         status_msg = await update.message.reply_text("🔄 Загружаю календарь листингов MEXC...")
         
         try:
-            from exchange_checker import ExchangeChecker
-            from mexc_scraper import MexcScraper
-            
-            checker = ExchangeChecker()
-            scraper = MexcScraper()
-            listings = await scraper.get_new_listings()
+            # Используем встроенный детектор который фильтрует за 24ч
+            listings = await self.listing_detector.get_recent_listings(hours=24)
             
             if not listings:
                 await status_msg.edit_text(
-                    "⚠️ **Листинги не найдены**\n\n"
-                    "Возможные причины:\n"
-                    "• Нет запланированных листингов\n"
-                    "• MEXC API недоступен\n\n"
-                    "Попробуйте позже.",
+                    "⚠️ **Новых листингов за 24ч не найдено**",
                     parse_mode='Markdown'
                 )
                 return
             
-            msg = "📅 **Ближайшие листинги MEXC**\n\n"
+            msg = "📅 **Новые фьючерсы MEXC (24ч)**\n\n"
             
-            for item in listings[:7]:  # Показываем до 7 листингов
+            for item in listings[:10]:
                 symbol = item['symbol']
-                pair = item['pair']
                 time_str = item['time_str']
-                hours_until = item.get('hours_until', 0)
+                mexc_link = f"https://futures.mexc.com/exchange/{symbol}_USDT"
                 
-                # Форматируем время до листинга
-                if hours_until < 1:
-                    time_until_str = f"⚡ {int(hours_until * 60)} мин"
-                elif hours_until < 24:
-                    time_until_str = f"⏳ {hours_until:.1f} ч"
-                else:
-                    days = hours_until / 24
-                    time_until_str = f"📆 {days:.1f} дн"
-                
-                msg += f"🚀 **{pair}**\n"
-                msg += f"📍 {time_str} ({time_until_str})\n"
-                
-                # Проверяем на других биржах
-                exchanges = await checker.check_all_exchanges(symbol)
-                
-                exchange_status = []
-                if exchanges.get('Binance'):
-                    exchange_status.append(f"✅ [Binance]({exchanges['Binance']})")
-                else:
-                    exchange_status.append("❌ Binance")
-                    
-                if exchanges.get('Bybit'):
-                    exchange_status.append(f"✅ [Bybit]({exchanges['Bybit']})")
-                else:
-                    exchange_status.append("❌ Bybit")
-                    
-                if exchanges.get('Gate'):
-                    exchange_status.append(f"✅ [Gate]({exchanges['Gate']})")
-                else:
-                    exchange_status.append("❌ Gate")
-                
-                msg += " | ".join(exchange_status) + "\n\n"
-            
+                msg += f"• [{symbol}]({mexc_link}) — {time_str}\n"
+
             await status_msg.edit_text(msg, parse_mode='Markdown', disable_web_page_preview=True)
-            
         except Exception as e:
             logger.error(f"Ошибка /listing: {e}", exc_info=True)
             await status_msg.edit_text(f"❌ Ошибка: {e}")
@@ -628,9 +667,12 @@ class RestPumpDetector:
         
         await self.app.bot.send_message(
             chat_id=self.chat_id,
-            text="🟢 **MMR TURBO запущен!**\n\nИнтервал: 1.5с",
+            text="🟢 **MMR TURBO запущен!**\n\n• Памп детекция: 1.5с\n• Листинг детекция: 30с",
             parse_mode='Markdown'
         )
+        
+        # Запускаем детектор листингов в фоне
+        listing_task = asyncio.create_task(self.listing_detector.run())
         
         try:
             while True:
