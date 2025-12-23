@@ -24,11 +24,14 @@ class ListingDetector:
                            Принимает (symbol: str, contract_data: dict)
         """
         self.api_url = "https://contract.mexc.com/api/v1/contract/detail"
-        self.known_symbols: Set[str] = set()
         self.snapshot_file = Path("data/known_contracts.json")
         self.on_new_listing = on_new_listing
         self.check_interval = 30  # секунд
         self.running = False
+        
+        # Инициализация
+        self.known_symbols: Set[str] = set()
+        self.first_seen: Dict[str, str] = {}
         
         # Загружаем сохранённый снапшот
         self._load_snapshot()

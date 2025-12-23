@@ -63,6 +63,7 @@ class RestPumpDetector:
         # Cooldown
         self.pump_cooldown = {}
         self.signal_cooldown = {}
+        self.active_analyses = set()  # Множество активных задач анализа (чтобы не запускать дубли)
         self.last_notified_peak = {}  # symbol -> last peak price we notified about
         self.cooldown_minutes = 2
         self.repeat_pump_threshold = 10.0  # Повторное уведомление только при +10% от последнего пика
@@ -334,60 +335,84 @@ class RestPumpDetector:
                 if should_notify:
                     await self.send_pump_alert(pump_data)
                 
-                # Запускаем анализ В ФОНЕ - не блокируем поиск новых пампов
-                asyncio.create_task(self._analyze_with_notification(symbol, pump_data, now))
+                # Запускаем анализ В ФОНЕ (только если еще не анализируем)
+                if symbol not in self.active_analyses:
+                    self.active_analyses.add(symbol)
+                    asyncio.create_task(self._analyze_with_notification(symbol, pump_data, now))
+                else:
+                    logger.debug(f"🔄 {symbol}: Анализ уже идёт, пропускаем запуск дубля")
         
         logger.info(f"📊 Скан #{self.scan_count}: {pumps_found} пампов | Всего: {self.pump_count} пампов, {self.signal_count} сигналов")
     
     async def _analyze_with_notification(self, symbol: str, pump_data: Dict, detected_time: datetime):
         """
-        Упорный поиск ТВХ - несколько попыток с интервалами.
-        Не сдаёмся после первой неудачи!
+        Мониторинг монеты после пампа (до 45 минут).
+        Ищет ТВХ пока цена высокая. 
+        Если цена падает без сигнала - сообщает 1 раз.
         """
-        max_attempts = 5  # Максимум попыток
-        attempt_interval = 6  # Секунд между попытками
-        
-        for attempt in range(1, max_attempts + 1):
-            try:
-                logger.info(f"🎯 {symbol}: Попытка #{attempt} найти ТВХ...")
-                
-                # Обновляем данные пампа с текущей ценой
+        try:
+            logger.info(f"🔄 {symbol}: Запуск мониторинга ТВХ (макс 45 мин)...")
+            
+            start_price = pump_data.get('price_start')
+            peak_price = pump_data.get('price_peak')
+            max_duration = 45 * 60  # 45 минут
+            check_interval = 10      # Проверка каждые 10 сек
+            start_time = datetime.now()
+            
+            while (datetime.now() - start_time).total_seconds() < max_duration:
+                # 1. Обновляем текущую цену
+                current_price = 0
                 if symbol in self.price_snapshots and self.price_snapshots[symbol]:
-                    current_price = self.price_snapshots[symbol][-1][1]
-                    pump_data['current_price'] = current_price
+                     current_price = self.price_snapshots[symbol][-1][1]
+                     pump_data['current_price'] = current_price
                 
+                if current_price == 0:
+                    await asyncio.sleep(check_interval)
+                    continue
+
+                # 2. Пробуем найти сигнал
                 signal = await self.analyze_and_generate_signal(symbol, pump_data)
                 
                 if signal:
-                    self.signal_cooldown[symbol] = detected_time
-                    logger.info(f"✅ {symbol}: ТВХ найдена на попытке #{attempt}!")
-                    return  # Успех! Выходим
+                    logger.info(f"✅ {symbol}: ТВХ найдена! Завершаю мониторинг.")
+                    self.signal_cooldown[symbol] = datetime.now()
+                    return  # Успех! Сигнал отправлен внутри analyze_and_generate_signal
                 
-                # Если не последняя попытка - ждём и пробуем снова
-                if attempt < max_attempts:
-                    logger.info(f"⏳ {symbol}: ТВХ не прошла, жду {attempt_interval}с для попытки #{attempt + 1}...")
-                    await asyncio.sleep(attempt_interval)
-                    
-            except Exception as e:
-                logger.error(f"❌ {symbol}: Ошибка попытки #{attempt}: {e}")
-                if attempt < max_attempts:
-                    await asyncio.sleep(attempt_interval)
-        
-        # Все попытки исчерпаны - сообщаем
-        logger.warning(f"😔 {symbol}: Не нашли ТВХ за {max_attempts} попыток")
-        await self.send_no_signal_notification(symbol, pump_data, max_attempts)
+                # 3. Проверяем, не упала ли монета (Pump Dumped)
+                # Критерий: цена упала ниже (старт + 20% от роста) или просто вернулась к старту
+                # Или если прошло > 15 мин и цена < пик - 50% движения
+                
+                movement = peak_price - start_price
+                retrace_threshold = peak_price - (movement * 0.7) # Упала на 70% от движения
+                
+                # Если цена упала ниже порога отката ИЛИ вернулась к старту (+1%)
+                if current_price < retrace_threshold or current_price <= start_price * 1.01:
+                    logger.warning(f"📉 {symbol}: Монета упала без сигнала. (Price: {current_price:.6f})")
+                    await self.send_no_signal_notification(symbol, pump_data, reason="Цена упала, ТВХ не найдена")
+                    return
+
+                # Продолжаем наблюдение
+                await asyncio.sleep(check_interval)
+            
+            logger.info(f"⌛ {symbol}: Таймаут мониторинга (45 мин).")
+            
+        except Exception as e:
+            logger.error(f"❌ {symbol}: Ошибка мониторинга: {e}")
+        finally:
+            # Обязательно удаляем из активных, чтобы можно было снова пустить анализ если будет новый памп
+            self.active_analyses.discard(symbol)
     
-    async def send_no_signal_notification(self, symbol: str, pump_data: Dict, attempts: int = 1):
-        """Уведомление что ТВХ не найдена"""
+    async def send_no_signal_notification(self, symbol: str, pump_data: Dict, reason: str = "Не прошли фильтры"):
+        """Уведомление что ТВХ не найдена и мониторинг завершён"""
         try:
             msg = f"""
 ⚠️ **ТВХ не найдена**
 
 Пара: `{symbol}`
 Памп: +{pump_data['increase_pct']:.1f}%
-Попыток: {attempts}
 
-Причина: Не прошли фильтры (RSI/объем/ордербук)
+📝 Итог: **Мониторинг завершён**
+Причина: {reason}
 """
             await self.app.bot.send_message(
                 chat_id=self.chat_id,
@@ -589,29 +614,48 @@ class RestPumpDetector:
         await update.message.reply_text(msg, parse_mode='Markdown')
 
     async def listing_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Команда /listing - календарь листингов MEXC"""
-        status_msg = await update.message.reply_text("🔄 Загружаю календарь листингов MEXC...")
+        """Команда /listing - календарь листингов"""
+        status_msg = await update.message.reply_text("🔄 Загружаю данные о листингах...")
         
         try:
-            # Используем встроенный детектор который фильтрует за 24ч
-            listings = await self.listing_detector.get_recent_listings(hours=24)
+            from announcement_parser import AnnouncementParser
+            parser = AnnouncementParser()
             
-            if not listings:
-                await status_msg.edit_text(
-                    "⚠️ **Новых листингов за 24ч не найдено**",
-                    parse_mode='Markdown'
-                )
-                return
+            msg = ""
             
-            msg = "📅 **Новые фьючерсы MEXC (24ч)**\n\n"
+            # 1. Новые фьючерсы MEXC за 24ч
+            mexc_listings = await self.listing_detector.get_recent_listings(hours=24)
+            if mexc_listings:
+                msg += "📅 **Новые фьючерсы MEXC (24ч)**\n\n"
+                for item in mexc_listings[:7]:
+                    symbol = item['symbol']
+                    time_str = item['time_str']
+                    lev = item.get('leverage', 0)
+                    mexc_link = f"https://futures.mexc.com/exchange/{symbol}_USDT"
+                    msg += f"• [{symbol}]({mexc_link}) — {time_str} (x{lev})\n"
+                msg += "\n"
             
-            for item in listings[:10]:
-                symbol = item['symbol']
-                time_str = item['time_str']
-                mexc_link = f"https://futures.mexc.com/exchange/{symbol}_USDT"
-                
-                msg += f"• [{symbol}]({mexc_link}) — {time_str}\n"
-
+            # 2. Binance анонсы (индикатор будущих листингов)
+            binance_listings = await parser.get_binance_new_listings()
+            if binance_listings:
+                msg += "🔮 **Binance анонсы** _(могут появиться на MEXC)_\n\n"
+                for item in binance_listings[:5]:
+                    symbols = item.get('symbols', [])
+                    title = item.get('title', '')[:50]
+                    
+                    for sym in symbols[:2]:
+                        # Проверяем есть ли уже на MEXC
+                        mexc_data = await parser.check_mexc_has_futures(sym)
+                        if mexc_data:
+                            mexc_link = f"https://futures.mexc.com/exchange/{mexc_data['symbol']}"
+                            msg += f"✅ [{sym}]({mexc_link}) — уже на MEXC (x{mexc_data['maxLeverage']})\n"
+                        else:
+                            msg += f"⏳ **{sym}** — ждём на MEXC\n"
+                msg += "\n"
+            
+            if not msg:
+                msg = "⚠️ Нет данных о листингах"
+            
             await status_msg.edit_text(msg, parse_mode='Markdown', disable_web_page_preview=True)
         except Exception as e:
             logger.error(f"Ошибка /listing: {e}", exc_info=True)
