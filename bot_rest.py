@@ -618,9 +618,6 @@ class RestPumpDetector:
         status_msg = await update.message.reply_text("🔄 Загружаю данные о листингах...")
         
         try:
-            from announcement_parser import AnnouncementParser
-            parser = AnnouncementParser()
-            
             msg = ""
             
             # 1. Новые фьючерсы MEXC за 24ч
@@ -635,26 +632,55 @@ class RestPumpDetector:
                     msg += f"• [{symbol}]({mexc_link}) — {time_str} (x{lev})\n"
                 msg += "\n"
             
-            # 2. Binance анонсы (индикатор будущих листингов)
-            binance_listings = await parser.get_binance_new_listings()
-            if binance_listings:
-                msg += "🔮 **Binance анонсы** _(могут появиться на MEXC)_\n\n"
-                for item in binance_listings[:5]:
-                    symbols = item.get('symbols', [])
-                    title = item.get('title', '')[:50]
-                    
-                    for sym in symbols[:2]:
-                        # Проверяем есть ли уже на MEXC
-                        mexc_data = await parser.check_mexc_has_futures(sym)
-                        if mexc_data:
-                            mexc_link = f"https://futures.mexc.com/exchange/{mexc_data['symbol']}"
-                            msg += f"✅ [{sym}]({mexc_link}) — уже на MEXC (x{mexc_data['maxLeverage']})\n"
-                        else:
-                            msg += f"⏳ **{sym}** — ждём на MEXC\n"
-                msg += "\n"
+            # 2. Анонсы из Telegram канала MEXC
+            try:
+                from telegram_parser import SimpleTelegramParser
+                tg_parser = SimpleTelegramParser()
+                tg_listings = await tg_parser.get_listings()
+                
+                if tg_listings:
+                    msg += "📢 **Анонсы из Telegram MEXC**\n\n"
+                    for item in tg_listings[:5]:
+                        symbols = item.get('symbols', [])
+                        listing_type = "🔮 Фьючерс" if item.get('type') == 'futures' else "💰 Спот"
+                        trading_time = item.get('trading_time', '')
+                        
+                        for sym in symbols[:2]:
+                            if trading_time:
+                                msg += f"{listing_type} **{sym}** — {trading_time}\n"
+                            else:
+                                msg += f"{listing_type} **{sym}**\n"
+                    msg += "\n"
+            except Exception as tg_err:
+                logger.warning(f"Telegram parser: {tg_err}")
+            
+            # 3. Binance анонсы (индикатор)
+            try:
+                from announcement_parser import AnnouncementParser
+                parser = AnnouncementParser()
+                binance_listings = await parser.get_binance_new_listings()
+                
+                if binance_listings:
+                    msg += "🔮 **Binance анонсы** _(индикатор)_\n\n"
+                    shown = 0
+                    for item in binance_listings[:5]:
+                        for sym in item.get('symbols', [])[:1]:
+                            mexc_data = await parser.check_mexc_has_futures(sym)
+                            if mexc_data:
+                                mexc_link = f"https://futures.mexc.com/exchange/{mexc_data['symbol']}"
+                                msg += f"✅ [{sym}]({mexc_link}) — на MEXC\n"
+                            else:
+                                msg += f"⏳ **{sym}** — ждём\n"
+                            shown += 1
+                            if shown >= 5:
+                                break
+                        if shown >= 5:
+                            break
+            except Exception as bn_err:
+                logger.warning(f"Binance parser: {bn_err}")
             
             if not msg:
-                msg = "⚠️ Нет данных о листингах"
+                msg = "⚠️ Нет данных о листингах\n\n_Совет: следите за каналом @MEXCOfficialNews_"
             
             await status_msg.edit_text(msg, parse_mode='Markdown', disable_web_page_preview=True)
         except Exception as e:
