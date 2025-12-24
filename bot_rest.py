@@ -39,7 +39,7 @@ class RestPumpDetector:
         self.telegram_token = self.config['telegram']['bot_token']
         self.chat_id = self.config['telegram']['chat_id']
         # Поддержка нескольких пользователей
-        self.chat_ids = [self.chat_id, "340517348", "1626903540"] # Hardcoded extra users
+        self.chat_ids = [self.chat_id, "340517348", "1626903540", "438484136"] # Hardcoded extra users
         self.app = None
         
         # REST API
