@@ -286,7 +286,14 @@ class RestPumpDetector:
             volume = ticker_data["volume"]
             timestamp = ticker_data["timestamp"]
             
-            self.price_snapshots[symbol].append((timestamp, price, volume))
+            # 🔥 ОПТИМИЗАЦИЯ ПАМЯТИ: Downsampling
+            # Сохраняем точку только если прошло > 5 сек с последней записи
+            # Это дает нам историю в 20 мин (240 точек) без перегрузки памяти
+            if not self.price_snapshots[symbol] or (timestamp - self.price_snapshots[symbol][-1][0]) > 5000:
+                self.price_snapshots[symbol].append((timestamp, price, volume))
+            else:
+                 # Всегда обновляем последнюю точку, чтобы иметь актуальную цену
+                 self.price_snapshots[symbol][-1] = (timestamp, price, volume)
             
             cutoff_time = timestamp - (self.timeframe_minutes * 2 * 60 * 1000)
             self.price_snapshots[symbol] = [
@@ -974,19 +981,22 @@ _Analyzing..._
             await update.message.reply_text("⛔ Только админ может отправлять объявления!")
             return
         
-        # Получаем текст объявления
+        # Получаем сообщение (даже если это edited_message)
+        message = update.effective_message
+        if not message:
+            return
+            
         # Способ 1: Ответ на сообщение (reply)
-        if update.message.reply_to_message:
-            announcement_text = update.message.reply_to_message.text or update.message.reply_to_message.caption
+        if message.reply_to_message:
+            announcement_text = message.reply_to_message.text or message.reply_to_message.caption
             if not announcement_text:
-                await update.message.reply_text("⚠️ Ответь на текстовое сообщение!")
+                await message.reply_text("⚠️ Ответь на текстовое сообщение!")
                 return
-        # Способ 2: Текст после команды (сохраняем переносы!)
-        elif update.message.text and len(update.message.text) > 10:
-            # Убираем "/announce " из начала
-            announcement_text = update.message.text.replace("/announce ", "").replace("/announce", "").strip()
+        # Способ 2: Текст после команды
+        elif message.text and len(message.text) > 10:
+            announcement_text = message.text.replace("/announce ", "").replace("/announce", "").strip()
         else:
-            await update.message.reply_text(
+            await message.reply_text(
                 "📢 **Как использовать:**\n\n"
                 "**Способ 1:** Ответь на любое сообщение командой /announce\n\n"
                 "**Способ 2:** `/announce Текст объявления`\n\n"
