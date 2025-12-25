@@ -80,7 +80,7 @@ class TurboEngine:
     🚀 ТУРБО-ДВИЖОК - параллельный анализ с максимальной скоростью и точностью.
     """
     
-    __slots__ = ('god_eye', 'dominator', 'advanced', 'klines_cache', 'orderbook_cache', 'analysis_cache')
+    __slots__ = ('god_eye', 'dominator', 'advanced', 'klines_cache', 'orderbook_cache', 'analysis_cache', 'precision')
     
     def __init__(self):
         # Инициализируем анализаторы
