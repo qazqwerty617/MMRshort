@@ -77,7 +77,7 @@ class RestPumpDetector:
         # Параметры детекции
         self.min_pump_pct = self.config['pump_detection']['min_price_increase_pct']
         self.timeframe_minutes = self.config['pump_detection']['timeframe_minutes']
-        self.scan_interval = 1.0  # TURBO: 1 сек вместо 1.5
+        self.scan_interval = 0.1  # TURBO MAX: 0.1 сек (почти без пауз)
         
         
         # Детектор новых листингов
