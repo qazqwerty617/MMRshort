@@ -39,7 +39,7 @@ class RestPumpDetector:
         self.telegram_token = self.config['telegram']['bot_token']
         self.chat_id = self.config['telegram']['chat_id']
         # Поддержка нескольких пользователей
-        self.chat_ids = [self.chat_id, "340517348", "1626903540", "438484136"] # Hardcoded extra users
+        self.chat_ids = [self.chat_id, "340517348", "1626903540", "438484136", "5158984897"] # Hardcoded extra users
         self.app = None
         
         # REST API
@@ -69,6 +69,7 @@ class RestPumpDetector:
         self.last_notified_peak = {}  # symbol -> last peak price we notified about
         self.cooldown_minutes = 2
         self.repeat_pump_threshold = 10.0  # Повторное уведомление только при +10% от последнего пика
+        self.no_signal_cooldown = {}  # Cooldown для уведомлений "ТВХ не найдена"
         
         # Параметры детекции
         self.min_pump_pct = self.config['pump_detection']['min_price_increase_pct']
@@ -237,7 +238,11 @@ class RestPumpDetector:
         if time_since_peak > 1.5:
             return False, 0, 0, ""
 
-        if increase_pct >= self.min_pump_pct:
+        # 🔥 MICRO_PUMP: Быстрый импульс +5%+ за 30-60 сек (ножи!)
+        if increase_pct >= 5.0 and time_diff_minutes <= 1.0:
+            is_pump = True
+            pump_type = "MICRO_PUMP"  # Нож!
+        elif increase_pct >= self.min_pump_pct:
             is_pump = True
             pump_type = "MASSIVE"
         elif increase_pct >= 10.0 and time_diff_minutes <= 5.0:
@@ -245,8 +250,15 @@ class RestPumpDetector:
             pump_type = "FAST_IMPULSE"
 
         if is_pump:
-            pump_emoji = "🚀" if pump_type == "MASSIVE" else "⚡️"
-            logger.warning(f"{pump_type} {pump_emoji}: {symbol} +{increase_pct:.2f}% за {time_diff_minutes:.1f}мин")
+            if pump_type == "MICRO_PUMP":
+                pump_emoji = "🔪"  # Нож
+                logger.warning(f"🔪 MICRO_PUMP (НОЖ!): {symbol} +{increase_pct:.2f}% за {time_diff_seconds:.0f} сек!")
+            elif pump_type == "MASSIVE":
+                pump_emoji = "🚀"
+                logger.warning(f"{pump_type} {pump_emoji}: {symbol} +{increase_pct:.2f}% за {time_diff_minutes:.1f}мин")
+            else:
+                pump_emoji = "⚡️"
+                logger.warning(f"{pump_type} {pump_emoji}: {symbol} +{increase_pct:.2f}% за {time_diff_minutes:.1f}мин")
             return True, increase_pct, time_diff_minutes, pump_type
 
         return False, 0, 0, ""
@@ -353,20 +365,74 @@ class RestPumpDetector:
     
     async def _analyze_with_notification(self, symbol: str, pump_data: Dict, detected_time: datetime):
         """
-        Мониторинг монеты после пампа (до 45 минут).
-        Ищет ТВХ пока цена высокая. 
-        Если цена падает без сигнала - сообщает 1 раз.
+        Мониторинг монеты после пампа.
+        НОВАЯ ЛОГИКА:
+        - Для экстремальных пампов (+30%+) - мгновенный сигнал на пике
+        - Для обычных пампов - быстрый мониторинг (3 сек первые 2 мин)
         """
         try:
-            logger.info(f"🔄 {symbol}: Запуск мониторинга ТВХ (макс 45 мин)...")
-            
             start_price = pump_data.get('price_start')
             peak_price = pump_data.get('price_peak')
-            max_duration = 45 * 60  # 45 минут
-            check_interval = 10      # Проверка каждые 10 сек
+            increase_pct = pump_data.get('increase_pct', 0)
+            pump_type = pump_data.get('pump_type', '')
             start_time = datetime.now()
             
+            # 🔥 INSTANT SHORT: Для экстремальных пампов (+30%+) и НОЖЕЙ
+            # БЕЗОПАСНЫЙ РЕЖИМ: ждём подтверждение разворота (откат 1-2% от пика)
+            if increase_pct >= 30 or pump_type in ['MASSIVE', 'MICRO_PUMP']:
+                if pump_type == 'MICRO_PUMP':
+                    logger.warning(f"🔪 {symbol}: НОЖ +{increase_pct:.1f}% - жду подтверждение разворота...")
+                else:
+                    logger.warning(f"⚡ {symbol}: ЭКСТРЕМАЛЬНЫЙ ПАМП +{increase_pct:.1f}% - жду подтверждение разворота...")
+                
+                # Ждём откат 1-2% от пика (максимум 60 секунд)
+                confirmation_timeout = 60
+                confirmation_start = datetime.now()
+                confirmed = False
+                
+                while (datetime.now() - confirmation_start).total_seconds() < confirmation_timeout:
+                    await asyncio.sleep(2)  # Проверяем каждые 2 сек
+                    
+                    if symbol in self.price_snapshots and self.price_snapshots[symbol]:
+                        current_price = self.price_snapshots[symbol][-1][1]
+                        
+                        # Обновляем пик если цена выросла ещё
+                        if current_price > peak_price:
+                            peak_price = current_price
+                            pump_data['price_peak'] = peak_price
+                            continue
+                        
+                        # Проверяем откат от пика
+                        drop_from_peak = ((peak_price - current_price) / peak_price) * 100
+                        
+                        if drop_from_peak >= 1.0:  # Откат 1%+ = подтверждение разворота!
+                            logger.warning(f"✅ {symbol}: РАЗВОРОТ ПОДТВЕРЖДЁН! Откат -{drop_from_peak:.1f}% от пика")
+                            confirmed = True
+                            break
+                        elif drop_from_peak >= 0.5:
+                            logger.info(f"⏳ {symbol}: Начало отката -{drop_from_peak:.2f}%, жду 1%+...")
+                
+                if confirmed:
+                    # ТВХ = текущая цена (уже откатилась от пика)
+                    instant_entry = current_price
+                    pump_data['current_price'] = current_price
+                    await self.send_instant_short_signal(symbol, pump_data, instant_entry)
+                    self.signal_cooldown[symbol] = datetime.now()
+                    return
+                else:
+                    logger.warning(f"⚠️ {symbol}: Таймаут ожидания разворота (60 сек), продолжаю обычный мониторинг...")
+                    # Продолжаем в обычном режиме мониторинга
+            
+            logger.info(f"🔄 {symbol}: Мониторинг ТВХ (быстрый режим первые 2 мин)...")
+            
+            max_duration = 45 * 60  # 45 минут
+            
             while (datetime.now() - start_time).total_seconds() < max_duration:
+                elapsed = (datetime.now() - start_time).total_seconds()
+                
+                # Адаптивный интервал: 3 сек первые 2 мин, потом 10 сек
+                check_interval = 3 if elapsed < 120 else 10
+                
                 # 1. Обновляем текущую цену
                 current_price = 0
                 if symbol in self.price_snapshots and self.price_snapshots[symbol]:
@@ -383,22 +449,17 @@ class RestPumpDetector:
                 if signal:
                     logger.info(f"✅ {symbol}: ТВХ найдена! Завершаю мониторинг.")
                     self.signal_cooldown[symbol] = datetime.now()
-                    return  # Успех! Сигнал отправлен внутри analyze_and_generate_signal
+                    return
                 
                 # 3. Проверяем, не упала ли монета (Pump Dumped)
-                # Критерий: цена упала ниже (старт + 20% от роста) или просто вернулась к старту
-                # Или если прошло > 15 мин и цена < пик - 50% движения
-                
                 movement = peak_price - start_price
-                retrace_threshold = peak_price - (movement * 0.7) # Упала на 70% от движения
+                retrace_threshold = peak_price - (movement * 0.7)
                 
-                # Если цена упала ниже порога отката ИЛИ вернулась к старту (+1%)
                 if current_price < retrace_threshold or current_price <= start_price * 1.01:
-                    logger.warning(f"📉 {symbol}: Монета упала без сигнала. (Price: {current_price:.6f})")
+                    logger.warning(f"📉 {symbol}: Монета упала без сигнала.")
                     await self.send_no_signal_notification(symbol, pump_data, reason="Цена упала, ТВХ не найдена")
                     return
 
-                # Продолжаем наблюдение
                 await asyncio.sleep(check_interval)
             
             logger.info(f"⌛ {symbol}: Таймаут мониторинга (45 мин).")
@@ -406,12 +467,22 @@ class RestPumpDetector:
         except Exception as e:
             logger.error(f"❌ {symbol}: Ошибка мониторинга: {e}")
         finally:
-            # Обязательно удаляем из активных, чтобы можно было снова пустить анализ если будет новый памп
             self.active_analyses.discard(symbol)
     
     async def send_no_signal_notification(self, symbol: str, pump_data: Dict, reason: str = "Не прошли фильтры"):
-        """Уведомление что ТВХ не найдена и мониторинг завершён"""
+        """Уведомление что ТВХ не найдена и мониторинг завершён (макс 1 раз в 30 мин на символ)"""
         try:
+            # Проверяем cooldown чтобы не спамить
+            now = datetime.now()
+            if symbol in self.no_signal_cooldown:
+                time_since_last = (now - self.no_signal_cooldown[symbol]).total_seconds() / 60
+                if time_since_last < 30:  # Молчим 30 минут после последнего уведомления
+                    logger.debug(f"🔇 {symbol}: Пропуск уведомления (cooldown {30 - time_since_last:.1f} мин)")
+                    return
+            
+            # Запоминаем время уведомления
+            self.no_signal_cooldown[symbol] = now
+            
             msg = f"""
 ⚠️ **ТВХ не найдена**
 
@@ -427,6 +498,81 @@ class RestPumpDetector:
             )
         except Exception as e:
             logger.error(f"Ошибка отправки no-signal: {e}")
+    
+    async def send_instant_short_signal(self, symbol: str, pump_data: Dict, entry_price: float):
+        """
+        🔥 INSTANT SHORT - мгновенный сигнал для экстремальных пампов
+        Отправляется сразу на пике без ожидания
+        """
+        try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            
+            increase_pct = pump_data.get('increase_pct', 0)
+            peak_price = pump_data.get('price_peak', entry_price)
+            
+            self.signal_count += 1
+            logger.warning(f"⚡🎯 INSTANT SHORT #{self.signal_count}: {symbol} @ {entry_price:.8f}")
+            
+            msg = f"""
+⚡⚡⚡ **INSTANT SHORT** ⚡⚡⚡
+
+**Пара:** `{symbol}`
+**Вход:** `{entry_price:.8f}`
+**Пик:** `{peak_price:.8f}`
+
+🚀 **Памп: +{increase_pct:.1f}%**
+
+✅ _Разворот подтверждён (откат от пика)_
+
+📉 Стоп: пик +3-5%
+🎯 Тейк: -10%, -20%, -30%
+"""
+            
+            mexc_url = f"https://futures.mexc.com/exchange/{symbol}?type=linear_swap"
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📈 Открыть MEXC", url=mexc_url)]
+            ])
+            
+            await self.broadcast_message(
+                text=msg,
+                parse_mode='Markdown',
+                reply_markup=keyboard
+            )
+            
+            # Сохраняем в БД
+            try:
+                pump_id = self.db.add_pump(
+                    symbol=symbol,
+                    price_start=pump_data.get('price_start', 0),
+                    price_peak=peak_price,
+                    price_increase_pct=increase_pct,
+                    volume_spike=pump_data.get('volume_spike', 1.5),
+                    timeframe_minutes=pump_data.get('timeframe_minutes', 20)
+                )
+                self.db.add_signal(
+                    pump_id=pump_id,
+                    symbol=symbol,
+                    entry_price=entry_price,
+                    stop_loss=None,
+                    take_profits=[],
+                    risk_reward=0,
+                    quality_score=9.0,  # Высокий score для instant
+                    factors={"instant_short": True, "pump_pct": increase_pct},
+                    weights={}
+                )
+                
+                # Регистрируем в трекере
+                self.signal_tracker.add_signal(
+                    symbol=symbol,
+                    entry_price=entry_price,
+                    peak_price=peak_price,
+                    pump_pct=increase_pct
+                )
+            except Exception as db_err:
+                logger.warning(f"⚠️ Ошибка БД (instant): {db_err}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка instant short: {e}")
     
     async def send_pump_alert(self, pump_data: Dict):
         """Отправить уведомление о пампе"""
@@ -763,6 +909,63 @@ class RestPumpDetector:
         msg = self.signal_generator.format_signal_message(fake_signal)
         await update.message.reply_text(msg, parse_mode='Markdown', disable_web_page_preview=True)
 
+    async def announce_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Команда /announce - отправить объявление всем пользователям
+        Только для админа (chat_id из config)
+        """
+        user_id = str(update.effective_user.id)
+        admin_id = str(self.chat_id)  # Админ из конфига
+        
+        # Проверка прав
+        if user_id != admin_id:
+            await update.message.reply_text("⛔ Только админ может отправлять объявления!")
+            return
+        
+        # Получаем текст объявления
+        if not context.args:
+            await update.message.reply_text(
+                "📢 **Как использовать:**\n\n"
+                "`/announce Ваше сообщение`\n\n"
+                "Сообщение будет отправлено всем пользователям бота.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        announcement_text = ' '.join(context.args)
+        
+        # Форматируем объявление
+        msg = f"""
+📢 **ОБЪЯВЛЕНИЕ**
+
+{announcement_text}
+
+_— Админ MMR Bot_
+"""
+        
+        # Отправляем всем
+        success_count = 0
+        fail_count = 0
+        
+        for chat_id in self.chat_ids:
+            try:
+                await self.app.bot.send_message(
+                    chat_id=chat_id,
+                    text=msg,
+                    parse_mode='Markdown'
+                )
+                success_count += 1
+            except Exception as e:
+                logger.error(f"Ошибка отправки {chat_id}: {e}")
+                fail_count += 1
+        
+        await update.message.reply_text(
+            f"✅ Объявление отправлено!\n\n"
+            f"Успешно: {success_count}\n"
+            f"Ошибок: {fail_count}",
+            parse_mode='Markdown'
+        )
+
     async def broadcast_message(self, text: str, parse_mode='Markdown', reply_markup=None, disable_web_page_preview=True):
         """Отправить сообщение всем пользователям"""
         for chat_id in self.chat_ids:
@@ -787,6 +990,7 @@ class RestPumpDetector:
         self.app.add_handler(CommandHandler("stats", self.stats_command))
         self.app.add_handler(CommandHandler("listing", self.listing_command))
         self.app.add_handler(CommandHandler("test", self.test_command))
+        self.app.add_handler(CommandHandler("announce", self.announce_command))
         
         await self.app.initialize()
         await self.app.start()
