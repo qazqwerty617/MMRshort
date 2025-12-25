@@ -74,7 +74,7 @@ class RestPumpDetector:
         # Параметры детекции
         self.min_pump_pct = self.config['pump_detection']['min_price_increase_pct']
         self.timeframe_minutes = self.config['pump_detection']['timeframe_minutes']
-        self.scan_interval = 1.5
+        self.scan_interval = 1.0  # TURBO: 1 сек вместо 1.5
         
         
         # Детектор новых листингов
@@ -385,13 +385,14 @@ class RestPumpDetector:
                 else:
                     logger.warning(f"⚡ {symbol}: ЭКСТРЕМАЛЬНЫЙ ПАМП +{increase_pct:.1f}% - жду подтверждение разворота...")
                 
-                # Ждём откат 1-2% от пика (максимум 60 секунд)
-                confirmation_timeout = 60
+                # БАЛАНС ТОЧНОСТИ: Ждём разворот до 5 минут (300 сек).
+                # Не бросаем монету быстро, ждём идеального входа.
+                confirmation_timeout = 300 
                 confirmation_start = datetime.now()
                 confirmed = False
                 
                 while (datetime.now() - confirmation_start).total_seconds() < confirmation_timeout:
-                    await asyncio.sleep(2)  # Проверяем каждые 2 сек
+                    await asyncio.sleep(1.0)  # Проверка каждую секунду (точно и стабильно)
                     
                     if symbol in self.price_snapshots and self.price_snapshots[symbol]:
                         current_price = self.price_snapshots[symbol][-1][1]
@@ -420,7 +421,7 @@ class RestPumpDetector:
                     self.signal_cooldown[symbol] = datetime.now()
                     return
                 else:
-                    logger.warning(f"⚠️ {symbol}: Таймаут ожидания разворота (60 сек), продолжаю обычный мониторинг...")
+                    logger.warning(f"⚠️ {symbol}: Таймаут ожидания разворота (120 сек), продолжаю обычный мониторинг...")
                     # Продолжаем в обычном режиме мониторинга
             
             logger.info(f"🔄 {symbol}: Мониторинг ТВХ (быстрый режим первые 2 мин)...")
@@ -923,25 +924,32 @@ class RestPumpDetector:
             return
         
         # Получаем текст объявления
-        if not context.args:
+        # Способ 1: Ответ на сообщение (reply)
+        if update.message.reply_to_message:
+            announcement_text = update.message.reply_to_message.text or update.message.reply_to_message.caption
+            if not announcement_text:
+                await update.message.reply_text("⚠️ Ответь на текстовое сообщение!")
+                return
+        # Способ 2: Текст после команды (сохраняем переносы!)
+        elif update.message.text and len(update.message.text) > 10:
+            # Убираем "/announce " из начала
+            announcement_text = update.message.text.replace("/announce ", "").replace("/announce", "").strip()
+        else:
             await update.message.reply_text(
                 "📢 **Как использовать:**\n\n"
-                "`/announce Ваше сообщение`\n\n"
-                "Сообщение будет отправлено всем пользователям бота.",
+                "**Способ 1:** Ответь на любое сообщение командой /announce\n\n"
+                "**Способ 2:** `/announce Текст объявления`\n\n"
+                "💡 Для переносов строк используй Enter при вводе!",
                 parse_mode='Markdown'
             )
             return
         
-        announcement_text = ' '.join(context.args)
+        if not announcement_text:
+            await update.message.reply_text("⚠️ Пустое сообщение!")
+            return
         
-        # Форматируем объявление
-        msg = f"""
-📢 **ОБЪЯВЛЕНИЕ**
-
-{announcement_text}
-
-_— Админ MMR Bot_
-"""
+        # Форматируем объявление (пересылаем текст как есть!)
+        msg = f"📢 *ОБЪЯВЛЕНИЕ*\n\n{announcement_text}\n\n_— Админ MMR Bot_"
         
         # Отправляем всем
         success_count = 0
@@ -998,10 +1006,11 @@ _— Админ MMR Bot_
         
         logger.info("✅ Telegram бот запущен (TURBO: 1.5s)")
         
-        await self.broadcast_message(
-            text="🟢 **MMR TURBO запущен!**\n\n• Памп детекция: 1.5с\n• Листинг детекция: 30с\n• /stats - статистика",
-            parse_mode='Markdown'
-        )
+        # Убрали спам при перезапуске
+        # await self.broadcast_message(
+        #     text="🟢 **MMR TURBO запущен!**\n\n• Памп детекция: 1.5с\n• Листинг детекция: 30с\n• /stats - статистика",
+        #     parse_mode='Markdown'
+        # )
         
         # Запускаем детектор листингов в фоне
         listing_task = asyncio.create_task(self.listing_detector.run())
