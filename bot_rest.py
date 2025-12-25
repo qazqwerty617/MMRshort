@@ -18,6 +18,7 @@ from coin_profiler import CoinProfiler
 from mexc_scraper import ListingDetector
 from signal_tracker import SignalTracker
 from logger import setup_logging, get_logger
+from sl_tp_calculator import SmartCalculator
 
 logger = setup_logging()
 
@@ -33,7 +34,9 @@ class RestPumpDetector:
         # Компоненты
         self.db = Database(self.config['database']['path'])
         self.coin_profiler = CoinProfiler(self.db, self.config['learning'])
+        self.coin_profiler = CoinProfiler(self.db, self.config['learning'])
         self.signal_generator = SignalGenerator(self.config, self.coin_profiler)
+        self.smart_calculator = SmartCalculator(database=self.db)
         
         # Telegram
         self.telegram_token = self.config['telegram']['bot_token']
@@ -377,13 +380,17 @@ class RestPumpDetector:
             pump_type = pump_data.get('pump_type', '')
             start_time = datetime.now()
             
-            # 🔥 INSTANT SHORT: Для экстремальных пампов (+30%+) и НОЖЕЙ
-            # БЕЗОПАСНЫЙ РЕЖИМ: ждём подтверждение разворота (откат 1-2% от пика)
-            if increase_pct >= 30 or pump_type in ['MASSIVE', 'MICRO_PUMP']:
-                if pump_type == 'MICRO_PUMP':
-                    logger.warning(f"🔪 {symbol}: НОЖ +{increase_pct:.1f}% - жду подтверждение разворота...")
+            # 🔥 INSTANT SHORT: Только для БЫСТРЫХ пампов!
+            # Критерий: +20%+ за 5 минут или меньше (или тип MICRO_PUMP/FAST_IMPULSE)
+            actual_time = pump_data.get('actual_time_minutes', 20)
+            is_fast_pump = actual_time <= 5.0 and increase_pct >= 20
+            is_knife = pump_type in ['MICRO_PUMP', 'FAST_IMPULSE']
+            
+            if is_fast_pump or is_knife:
+                if is_knife:
+                    logger.warning(f"🔪 {symbol}: НОЖ +{increase_pct:.1f}% за {actual_time:.1f}мин - жду подтверждение разворота...")
                 else:
-                    logger.warning(f"⚡ {symbol}: ЭКСТРЕМАЛЬНЫЙ ПАМП +{increase_pct:.1f}% - жду подтверждение разворота...")
+                    logger.warning(f"⚡ {symbol}: БЫСТРЫЙ ПАМП +{increase_pct:.1f}% за {actual_time:.1f}мин - жду подтверждение разворота...")
                 
                 # БАЛАНС ТОЧНОСТИ: Ждём разворот до 5 минут (300 сек).
                 # Не бросаем монету быстро, ждём идеального входа.
@@ -485,13 +492,9 @@ class RestPumpDetector:
             self.no_signal_cooldown[symbol] = now
             
             msg = f"""
-⚠️ **ТВХ не найдена**
+❌ *Вход не найден*
 
-Пара: `{symbol}`
-Памп: +{pump_data['increase_pct']:.1f}%
-
-📝 Итог: **Мониторинг завершён**
-Причина: {reason}
+`{symbol}` — +{pump_data['increase_pct']:.1f}%
 """
             await self.broadcast_message(
                 text=msg,
@@ -514,19 +517,68 @@ class RestPumpDetector:
             self.signal_count += 1
             logger.warning(f"⚡🎯 INSTANT SHORT #{self.signal_count}: {symbol} @ {entry_price:.8f}")
             
+            # === SMART SL/TP CALCULATION ===
+            
+            # Попытка получить стакан и свечи для точности
+            orderbook = self.signal_generator.previous_orderbooks.get(symbol)
+            start_price = pump_data.get('price_start', entry_price * 0.8)
+            actual_time = pump_data.get('actual_time_minutes', 5.0)
+            
+            # Получаем свечи для анализа формы и ATR
+            klines = []
+            try:
+                klines_url = f"{self.rest_url}/api/v1/contract/kline/{symbol}"
+                async with self.session.get(klines_url, params={"interval": "Min1", "limit": 30}) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get('success'):
+                            klines = data.get('data', [])
+            except Exception as ke:
+                logger.debug(f"Не удалось получить свечи для Smart TP: {ke}")
+
+            smart_levels = self.smart_calculator.calculate(
+                symbol=symbol,
+                entry_price=entry_price,
+                peak_price=peak_price,
+                start_price=start_price,
+                pump_speed_minutes=actual_time,
+                klines=klines,
+                orderbook=orderbook
+            )
+            
+            sl = smart_levels['stop_loss']
+            tps = smart_levels['take_profits']
+            
+            # Формируем красивые строки
+            sl_pct_diff = ((sl - entry_price) / entry_price) * 100
+            tp1_pct_diff = ((tps[0] - entry_price) / entry_price) * 100
+            tp2_pct_diff = ((tps[1] - entry_price) / entry_price) * 100
+            tp3_pct_diff = ((tps[2] - entry_price) / entry_price) * 100
+
+            # Получаем GodEye и Dominator данные из анализа
+            analysis = smart_levels.get('analysis', {})
+            god_eye_score = analysis.get('god_eye_score', 5.0)
+            god_eye_quality = analysis.get('god_eye_quality', '⭐ СТАНДАРТ')
+            dominator_score = analysis.get('dominator_score', 5.0)
+            domination_signal = analysis.get('domination_signal', 'NEUTRAL')
+            final_mult = analysis.get('final_multiplier', 1.0)
+
             msg = f"""
-⚡⚡⚡ **INSTANT SHORT** ⚡⚡⚡
+📉 *SHORT*
 
-**Пара:** `{symbol}`
-**Вход:** `{entry_price:.8f}`
-**Пик:** `{peak_price:.8f}`
+`{symbol}`
+Вход: `{entry_price:.8f}`
 
-🚀 **Памп: +{increase_pct:.1f}%**
+▸ Памп: +{increase_pct:.1f}%
+▸ Качество: {god_eye_score:.0f}/10 {god_eye_quality}
 
-✅ _Разворот подтверждён (откат от пика)_
+━━━━━━━━━━━━━━━
 
-📉 Стоп: пик +3-5%
-🎯 Тейк: -10%, -20%, -30%
+🛑 SL: `{sl:.8f}` _(+{sl_pct_diff:.1f}%)_
+
+✅ TP1: `{tps[0]:.8f}` _({tp1_pct_diff:.1f}%)_
+✅ TP2: `{tps[1]:.8f}` _({tp2_pct_diff:.1f}%)_
+✅ TP3: `{tps[2]:.8f}` _({tp3_pct_diff:.1f}%)_
 """
             
             mexc_url = f"https://futures.mexc.com/exchange/{symbol}?type=linear_swap"
@@ -580,13 +632,12 @@ class RestPumpDetector:
         try:
             actual_time = pump_data.get('actual_time_minutes', pump_data['timeframe_minutes'])
             msg = f"""
-🚀 **ПАМП ОБНАРУЖЕН**
+◈ *Pump Detected*
 
-Пара: `{pump_data['symbol']}`
-Рост: +{pump_data['increase_pct']:.2f}% за {actual_time:.1f} минут
-Цена: {pump_data['price_start']:.8f} → {pump_data['price_peak']:.8f}
+`{pump_data['symbol']}`
++{pump_data['increase_pct']:.1f}% in {actual_time:.0f}m
 
-⏳ Генерирую сигнал...
+_Analyzing..._
 """
             await self.broadcast_message(
                 text=msg,

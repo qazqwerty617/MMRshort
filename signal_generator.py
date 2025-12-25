@@ -72,9 +72,13 @@ class SignalGenerator:
         logger.info(f"🔍 {symbol}: Начинаю анализ для SHORT (памп: +{pump_data['increase_pct']:.2f}%)")
         
         # 🔥 СТРОГИЕ ФИЛЬТРЫ ДЛЯ ЛУЧШИХ ШОРТОВ
-        MIN_RSI_FOR_SHORT = 65  # RSI должен быть высоким
-        MIN_DEX_SPREAD_PCT = 5.0  # CEX должна быть дороже DEX на 5%+
-        MAX_DISTANCE_FROM_PEAK_PCT = 10  # Цена не должна упасть >10% от пика
+        pump_type = pump_data.get('pump_type', '')
+        is_fast_pump = pump_type in ['MASSIVE', 'FAST_IMPULSE', 'MICRO_PUMP']  # Включаем ножи!
+        
+        # Адаптивные параметры для быстрых пампов
+        MIN_RSI_FOR_SHORT = 55 if is_fast_pump else 65  # Меньше RSI для быстрых
+        MIN_DEX_SPREAD_PCT = 5.0
+        MAX_DISTANCE_FROM_PEAK_PCT = 15 if is_fast_pump else 10  # Больше диапазон для быстрых
         
         if len(price_history) < 2:
             logger.warning(f"❌ {symbol}: Критически мало данных (price_history={len(price_history)})")
@@ -180,9 +184,7 @@ class SignalGenerator:
                 logger.info(f"ℹ️ {symbol}: DEX дороже на {abs(dex_spread_data['spread_pct']):.2f}%")
         
         # 8. Получаем веса - АДАПТИВНЫЕ в зависимости от типа пампа
-        pump_type = pump_data.get('pump_type', '')
-        
-        if pump_type in ['MASSIVE', 'FAST_IMPULSE']:
+        if is_fast_pump:
             # Для быстрых/массивных пампов: приоритет DEX и объемы!
             weights = {
                 'divergence': 0.10,      # Снижен с ~0.25
@@ -215,16 +217,23 @@ class SignalGenerator:
             bonus_score += (whale_score / 10) * 1.0
         
         # 📊 OPEN INTEREST анализ
+        # При ПАМПЕ: Рост OI = шорты ликвидируются = пик близко = ХОРОШО для входа в шорт!
+        # Падение OI = лонги закрываются = тоже хорошо
         oi_result = await self.oi_analyzer.analyze(symbol)
         oi_score = oi_result.get('oi_score', 5.0)
-        if oi_score > 6:  # OI падает - лонги закрываются
+        oi_change = oi_result.get('oi_change', {})
+        oi_change_pct = oi_change.get('oi_change_pct', 0) if oi_change else 0
+        
+        # 🔥 НОВАЯ ЛОГИКА: при памповых движениях РОСТ OI — это ликвидации шортистов!
+        if oi_change_pct > 10:  # OI сильно растёт при пампе
+            # Шорты ликвидируются — пик близко!
+            oi_bonus = min(2.0, oi_change_pct / 10)
+            bonus_score += oi_bonus
+            logger.warning(f"🔥 {symbol}: OI РОСТ +{oi_change_pct:.1f}% = ЛИКВИДАЦИИ ШОРТОВ! Бонус +{oi_bonus:.1f}")
+        elif oi_score > 6:  # OI падает - лонги закрываются
             oi_bonus = (oi_score - 5) / 5 * 1.5  # До +1.5
             bonus_score += oi_bonus
-            logger.info(f"📉 {symbol}: OI бонус +{oi_bonus:.1f}")
-        elif oi_score < 4:  # OI растёт - опасно!
-            oi_penalty = (4 - oi_score) / 4 * 2.0  # До -2.0
-            bonus_score -= oi_penalty
-            logger.warning(f"⚠️ {symbol}: OI пенальти -{oi_penalty:.1f} (много новых лонгов!)")
+            logger.info(f"📉 {symbol}: OI падает (лонги закрываются) бонус +{oi_bonus:.1f}")
         
         # 📜 ИСТОРИЧЕСКИЙ ПАТТЕРН монеты
         pattern_result = self.pattern_analyzer.analyze(symbol)
@@ -259,16 +268,36 @@ class SignalGenerator:
         logger.info(f"   Факторы: div={divergence_score:.1f}, vol={volume_score:.1f}, ob={orderbook_score:.1f}, rsi={rsi:.0f}")
         logger.info(f"   Веса: div={weights['divergence']:.2f}, vol={weights['volume_drop']:.2f}, ob={weights['orderbook']:.2f}, rsi={weights['rsi_level']:.2f}")
         
-        if quality_score < self.config['min_quality_score']:
-            logger.warning(f"❌ {symbol}: Качество {quality_score:.2f} < минимум {self.config['min_quality_score']:.1f}")
+        # 🎯 СИСТЕМА A/B/C СИГНАЛОВ (все проходят, но с разным уровнем)
+        # A-SIGNAL: 7+ (лучшие)
+        # B-SIGNAL: 4.5-7 (хорошие)
+        # C-SIGNAL: 2.5-4.5 (рискованные)
+        
+        MIN_SCORE_FOR_SIGNAL = 2.5  # Минимум для любого сигнала
+        
+        if quality_score < MIN_SCORE_FOR_SIGNAL:
+            logger.warning(f"❌ {symbol}: Качество {quality_score:.2f} < {MIN_SCORE_FOR_SIGNAL} (слишком низкое)")
             return None
         
-        # 🔥 СТРОГИЕ ПРОВЕРКИ ДЛЯ ЛУЧШИХ ШОРТОВ:
+        # Определяем уровень сигнала
+        if quality_score >= 7.0:
+            signal_grade = 'A'
+            grade_emoji = '🔥'
+            grade_text = 'ЛУЧШИЙ ВХОД'
+        elif quality_score >= 4.5:
+            signal_grade = 'B'
+            grade_emoji = '⚡'
+            grade_text = 'ХОРОШИЙ ВХОД'
+        else:
+            signal_grade = 'C'
+            grade_emoji = '🎲'
+            grade_text = 'РИСКОВАННЫЙ'
         
-        # 1) RSI должен быть высоким
+        logger.warning(f"{grade_emoji} {symbol}: {signal_grade}-SIGNAL ({grade_text}) - Score: {quality_score:.1f}")
+        
+        # RSI теперь только информация, не блокирует
         if rsi < MIN_RSI_FOR_SHORT:
-            logger.warning(f"❌ {symbol}: RSI {rsi:.0f} < {MIN_RSI_FOR_SHORT} (недостаточно перекуплен)")
-            return None
+            logger.info(f"ℹ️ {symbol}: RSI {rsi:.0f} < {MIN_RSI_FOR_SHORT} (низкий, но пропускаем)")
         
         # 2) DEX спред - только информация (данные часто неточны)\r\n        # if dex_spread_data and dex_spread_data.get('spread_pct', 0) < MIN_DEX_SPREAD_PCT:\r\n        #     logger.warning(f\"❌ {symbol}: DEX спред...\")\r\n        #     return None
         
@@ -279,14 +308,23 @@ class SignalGenerator:
         if distance_from_peak > MAX_DISTANCE_FROM_PEAK_PCT:
             logger.warning(f"❌ {symbol}: Цена уже упала на {distance_from_peak:.1f}% от пика (поздно входить)")
             return None
-        elif distance_from_peak < 1:
-            logger.info(f"⏳ {symbol}: Цена ещё на пике, ждём откат для ТВХ...")
+        elif distance_from_peak < 0.5 and not is_fast_pump:
+            # Для обычных пампов ждём откат, для быстрых - нет!
+            logger.info(f"⏳ {symbol}: Цена ещё на пике, ждём откат...")
             return None
         else:
             logger.info(f"✅ {symbol}: Откат {distance_from_peak:.1f}% от пика - хорошая ТВХ!")
         
-        # 9. Определяем точку входа
-        entry_price = resistance_price if resistance_price else current_price
+        # 9. Определяем точку входа - МАКСИМАЛЬНО БЛИЗКО К ПИКУ!
+        if is_fast_pump:
+            # Для быстрых пампов: ТВХ = пик - 1% (лимитка близко к пику)
+            entry_price = peak_price * 0.99
+            logger.warning(f"💥 {symbol}: FAST PUMP - ТВХ на пике-1% @ {entry_price:.8f}")
+        elif resistance_price and resistance_price > current_price:
+            entry_price = resistance_price
+        else:
+            # Для обычных: текущая цена или чуть выше
+            entry_price = max(current_price, peak_price * 0.95)
         logger.info(f"💰 {symbol}: Вход @ {entry_price:.8f}")
         
         # 10. Рейтинг надёжности монеты
@@ -299,6 +337,9 @@ class SignalGenerator:
             "quality_score": display_score,
             "raw_quality_score": quality_score,
             "reliability_score": reliability,
+            "signal_grade": signal_grade,  # A / B / C
+            "grade_emoji": grade_emoji,
+            "grade_text": grade_text,
             "factors": {
                 "divergence_score": divergence_score,
                 "volume_drop_pct": volume_drop['volume_drop_pct'],
@@ -307,7 +348,7 @@ class SignalGenerator:
                 "funding_score": funding_score,
                 "mtf_score": mtf_score,
                 "whale_score": whale_data.get('whale_score', 0) if whale_data else 0,
-                "dex_score": dex_score,  # DEX фактор
+                "dex_score": dex_score,
                 "dex_spread_pct": dex_spread_data.get('spread_pct', 0) if dex_spread_data else 0
             },
             "weights": weights,
@@ -317,8 +358,8 @@ class SignalGenerator:
             "funding_data": funding_data,
             "mtf_data": mtf_data,
             "whale_data": whale_data,
-            "dex_data": dex_data,  # Данные DEX
-            "dex_spread": dex_spread_data  # Спред CEX/DEX
+            "dex_data": dex_data,
+            "dex_spread": dex_spread_data
         }
         
         logger.warning(f"🎯✅ SHORT СИГНАЛ СГЕНЕРИРОВАН: {symbol} @ {entry_price:.8f}")
@@ -328,21 +369,42 @@ class SignalGenerator:
         return signal
     
     def format_signal_message(self, signal: Dict) -> str:
-        """Форматировать сигнал для Telegram"""
+        """Форматировать сигнал для Telegram (PREMIUM DESIGN + GRADE)"""
         symbol = signal['symbol']
-        entry = signal['entry_price']
+        entry_price = signal['entry_price']
         quality = signal['quality_score']
-        reliability = signal['reliability_score']
-        factors = signal['factors']
+        
+        # Grade (A/B/C)
+        grade = signal.get('signal_grade', 'B')
+        grade_text = "PREMIUM" if grade == 'A' else "STANDARD" if grade == 'B' else "RISKY"
+        
+        # SL/TP
+        stop_loss = signal.get('stop_loss', entry_price * 1.05)
+        take_profits = signal.get('take_profits', [entry_price * 0.95, entry_price * 0.9, entry_price * 0.85])
         
         msg = f"""
-🎯 **СИГНАЛ НА ШОРТ**
+📉 *SHORT*   |   {grade}-TIER
 
-**Пара:** `{symbol}`
-**Вход:** `{entry:.8f}`
+`{symbol}`
+Вход: `{entry_price:.8f}`
 
-📊 **Анализ:**
+▸ Памп: +{signal.get('pump_increase_pct', 0):.1f}%
+▸ Качество: {quality:.0f}/10 {self._get_stars(quality)}
+
+━━━━━━━━━━━━━━━
+
+🛑 SL: `{stop_loss:.8f}` _(+{((stop_loss - entry_price)/entry_price*100):.1f}%)_
+
+✅ TP1: `{take_profits[0]:.8f}` _({((take_profits[0] - entry_price)/entry_price*100):.1f}%)_
+✅ TP2: `{take_profits[1]:.8f}` _({((take_profits[1] - entry_price)/entry_price*100):.1f}%)_
+✅ TP3: `{take_profits[2]:.8f}` _({((take_profits[2] - entry_price)/entry_price*100):.1f}%)_
 """
+        return msg
+    
+    def _get_stars(self, score: float) -> str:
+        if score >= 8: return "⭐⭐⭐ ИДЕАЛЬНЫЙ"
+        if score >= 6: return "⭐⭐ ХОРОШИЙ"
+        return "⭐ НОРМАЛЬНЫЙ"
         
         # Дивергенция
         div_score = factors['divergence_score']
