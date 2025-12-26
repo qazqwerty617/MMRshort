@@ -1172,40 +1172,95 @@ _Analyzing..._
     async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда /stats - статистика Win/Loss"""
         stats = self.signal_tracker.get_statistics()
+        brain_stats = self.god_brain.get_statistics_summary()
+        ml_status = self.ml_predictor.get_status()
+        trailing_status = self.trailing_tracker.get_status()
         
-        # Основная статистика
+        # Определяем emoji для WR
+        wr = brain_stats.get('win_rate', 0)
+        if wr >= 70:
+            wr_emoji = "🔥"
+        elif wr >= 50:
+            wr_emoji = "✅"
+        elif wr >= 30:
+            wr_emoji = "⚠️"
+        else:
+            wr_emoji = "❌"
+        
         msg = f"""
-📈 **Статистика сигналов**
+━━━━━━━━━━━━━━━━━━━━
+📊 *СТАТИСТИКА БОТА*
+━━━━━━━━━━━━━━━━━━━━
 
-**Общий результат:**
-Всего сделок: {stats['total']}
-✅ Win: {stats['wins']} | ❌ Loss: {stats['losses']}
-Винрейт: **{stats['win_rate']:.1f}%**
+🧠 *GOD BRAIN*
+┌─────────────────────
+│ 📝 Сигналов: `{brain_stats.get('total', 0)}`
+│ ✅ WIN: `{brain_stats.get('wins', 0)}` | ❌ LOSS: `{brain_stats.get('losses', 0)}`
+│ {wr_emoji} Win Rate: *{wr:.1f}%*
+│ 🪙 Монет изучено: `{brain_stats.get('unique_coins', 0)}`
+└─────────────────────
 
-**Профит:**
-Средний профит: {stats['avg_profit']:+.2f}%
-Общий профит: {stats['total_profit']:+.2f}%
-Средний WIN: +{stats['avg_win']:.2f}%
-Средний LOSS: {stats['avg_loss']:.2f}%
-
-🔄 Активных отслеживаний: {stats['active_tracking']}
+🤖 *ML MODEL*
+┌─────────────────────
+│ Статус: {'🟢 Обучена' if ml_status.get('is_trained') else '🔴 Ждёт данных'}
+│ Сэмплов: `{ml_status.get('training_samples', 0)}/20`
 """
         
-        # Лучшие монеты
-        if stats['best_coins']:
-            msg += "\n🏆 **Лучшие монеты:**\n"
-            for sym, profit, wins, losses in stats['best_coins'][:3]:
-                msg += f"• `{sym}` — {profit:+.1f}% ({wins}W/{losses}L)\n"
+        # Progress bar для ML
+        ml_progress = min(ml_status.get('training_samples', 0), 20)
+        filled = "█" * (ml_progress // 2)
+        empty = "░" * (10 - ml_progress // 2)
+        msg += f"│ [{filled}{empty}]\n"
+        msg += "└─────────────────────\n"
         
-        # Худшие монеты
-        if stats['worst_coins'] and stats['total'] > 5:
-            msg += "\n💀 **Худшие монеты:**\n"
-            for sym, profit, wins, losses in stats['worst_coins'][:2]:
-                if profit < 0:
-                    msg += f"• `{sym}` — {profit:.1f}% ({wins}W/{losses}L)\n"
+        # Top features
+        if ml_status.get('top_features'):
+            msg += "\n🎯 *ВАЖНЫЕ ФАКТОРЫ*\n"
+            for i, (feat, imp) in enumerate(ml_status['top_features'][:3], 1):
+                feat_name = feat.replace('_score', '').replace('_', ' ').title()
+                bar_len = int(abs(imp) * 20)
+                bar = "▓" * min(bar_len, 10)
+                msg += f"{i}. {feat_name}: {bar}\n"
         
-        if stats['total'] == 0:
-            msg = "📊 **Статистика пуста**\n\nСигналов пока не было или они ещё отслеживаются (нужно 60 мин после сигнала)."
+        # Best coins from GOD BRAIN memory
+        if self.god_brain.coin_memory:
+            msg += "\n🏆 *TOP МОНЕТЫ*\n"
+            sorted_coins = sorted(
+                self.god_brain.coin_memory.items(),
+                key=lambda x: x[1].get('win_rate', 0) * x[1].get('total_signals', 0),
+                reverse=True
+            )[:3]
+            for sym, data in sorted_coins:
+                coin_wr = data.get('win_rate', 0) * 100
+                total = data.get('total_signals', 0)
+                if total > 0:
+                    msg += f"• `{sym}` — {coin_wr:.0f}% WR ({total} сигналов)\n"
+        
+        # Active tracking
+        msg += f"\n⏱️ *АКТИВНЫЕ*\n"
+        msg += f"├ Отслеживаний: `{stats['active_tracking']}`\n"
+        msg += f"└ Trailing TP: `{trailing_status['active_count']}`\n"
+        
+        # Uptime indicator
+        msg += f"\n━━━━━━━━━━━━━━━━━━━━"
+        
+        if brain_stats.get('total', 0) == 0:
+            msg = """
+━━━━━━━━━━━━━━━━━━━━
+📊 *СТАТИСТИКА*
+━━━━━━━━━━━━━━━━━━━━
+
+📭 *Данных пока нет*
+
+После первых сигналов здесь появится:
+• Win Rate по всем монетам
+• Лучшие и худшие монеты
+• ML модель (после 20 сигналов)
+• История по каждой монете
+
+_Бот запущен и готов к работе!_ 🚀
+━━━━━━━━━━━━━━━━━━━━
+"""
         
         await update.message.reply_text(msg, parse_mode='Markdown')
 
