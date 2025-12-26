@@ -92,6 +92,7 @@ class RestPumpDetector:
         self.active_analyses = set()  # Множество активных задач анализа (чтобы не запускать дубли)
         self.last_notified_peak = {}  # symbol -> last peak price we notified about
         self.last_notified_type = {}  # symbol -> last pump type (MICRO/FAST/MASSIVE)
+        self.logged_pumps = {}  # symbol -> timestamp of last log (to prevent spam)
         self.cooldown_minutes = 2
         self.repeat_pump_threshold = 10.0  # Повторное уведомление только при +10% от последнего пика
         self.no_signal_cooldown = {}  # Cooldown для уведомлений "ТВХ не найдена"
@@ -304,15 +305,26 @@ class RestPumpDetector:
             pump_type = "MASSIVE"
 
         if is_pump:
+            # Проверяем cooldown для логирования (чтобы не спамить)
+            now = datetime.now()
+            last_log = self.logged_pumps.get(symbol)
+            should_log = last_log is None or (now - last_log).total_seconds() > 30
+            
             if pump_type == "MICRO_PUMP":
                 pump_emoji = "🔪"  # Нож
-                logger.warning(f"🔪 MICRO_PUMP (НОЖ!): {symbol} +{increase_pct:.2f}% за {time_diff_seconds:.0f} сек!")
+                if should_log:
+                    logger.warning(f"🔪 MICRO_PUMP (НОЖ!): {symbol} +{increase_pct:.2f}% за {time_diff_seconds:.0f} сек!")
+                    self.logged_pumps[symbol] = now
             elif pump_type == "MASSIVE":
                 pump_emoji = "🚀"
-                logger.warning(f"{pump_type} {pump_emoji}: {symbol} +{increase_pct:.2f}% за {time_diff_minutes:.1f}мин")
+                if should_log:
+                    logger.warning(f"{pump_type} {pump_emoji}: {symbol} +{increase_pct:.2f}% за {time_diff_minutes:.1f}мин")
+                    self.logged_pumps[symbol] = now
             else:
                 pump_emoji = "⚡️"
-                logger.warning(f"{pump_type} {pump_emoji}: {symbol} +{increase_pct:.2f}% за {time_diff_minutes:.1f}мин")
+                if should_log:
+                    logger.warning(f"{pump_type} {pump_emoji}: {symbol} +{increase_pct:.2f}% за {time_diff_minutes:.1f}мин")
+                    self.logged_pumps[symbol] = now
             return True, increase_pct, time_diff_minutes, pump_type
 
         return False, 0, 0, ""
