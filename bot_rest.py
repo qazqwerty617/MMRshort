@@ -19,6 +19,18 @@ from mexc_scraper import ListingDetector
 from signal_tracker import SignalTracker
 from logger import setup_logging, get_logger
 from sl_tp_calculator import SmartCalculator
+from ultra_orderbook import UltraOrderbook, get_ultra_orderbook
+from open_interest_analyzer import OpenInterestAnalyzer
+from funding_rate_analyzer import FundingRateAnalyzer
+from liquidation_heatmap import LiquidationHeatmap, get_liq_heatmap
+from god_brain import GodBrain, get_god_brain
+from ml_predictor import MLPredictor, get_ml_predictor
+from trailing_tp import TrailingTPTracker, get_trailing_tracker
+from advanced_analyzers import (
+    MultiTimeframeAnalyzer, get_mtf_analyzer,
+    VolumeProfileAnalyzer, get_volume_analyzer,
+    CrossPairAnalyzer, get_cross_pair_analyzer
+)
 
 logger = setup_logging()
 
@@ -34,9 +46,18 @@ class RestPumpDetector:
         # Компоненты
         self.db = Database(self.config['database']['path'])
         self.coin_profiler = CoinProfiler(self.db, self.config['learning'])
-        self.coin_profiler = CoinProfiler(self.db, self.config['learning'])
         self.signal_generator = SignalGenerator(self.config, self.coin_profiler)
         self.smart_calculator = SmartCalculator(database=self.db)
+        self.ultra_ob = get_ultra_orderbook()  # 🔥 Ultra Orderbook Analyzer
+        self.oi_analyzer = OpenInterestAnalyzer()  # 🔥 Open Interest Analyzer
+        self.funding_analyzer = None  # Will init after session ready
+        self.liq_heatmap = get_liq_heatmap()  # 🔥 Liquidation Heatmap
+        self.god_brain = get_god_brain()  # 🧠 GOD BRAIN - Learning System
+        self.ml_predictor = get_ml_predictor()  # 🤖 ML Predictor
+        self.trailing_tracker = get_trailing_tracker()  # 📈 Trailing TP
+        self.mtf_analyzer = get_mtf_analyzer()  # ⏱️ Multi-Timeframe
+        self.volume_analyzer = get_volume_analyzer()  # 📊 Volume Profile
+        self.cross_pair_analyzer = get_cross_pair_analyzer()  # 🔗 Cross-Pair
         
         # Telegram
         self.telegram_token = self.config['telegram']['bot_token']
@@ -94,7 +115,16 @@ class RestPumpDetector:
         # Callback для отправки результата в Telegram
         self.signal_tracker.on_notification_callback = self._on_signal_result
         
-        logger.info("🔄 REST Detector + Listing + Signal Tracker инициализирован")
+        # 🤖 AUTO-TRAIN ML на старте если есть данные в GOD BRAIN
+        try:
+            trained = self.ml_predictor.train()
+            if trained:
+                status = self.ml_predictor.get_status()
+                logger.info(f"🤖 ML Model обучена на {status['training_samples']} сигналах")
+        except Exception as ml_train_err:
+            logger.debug(f"ML training on startup skipped: {ml_train_err}")
+        
+        logger.info("🔄 REST Detector + Listing + Signal Tracker + ML инициализирован")
     
     async def start_session(self):
         """Инициализировать persistent HTTP сессию"""
@@ -216,7 +246,11 @@ class RestPumpDetector:
         if len(recent) < 2:
             return False, 0, 0, ""
         
-        price_start = recent[0][1]
+        # 🔥 FIX: Находим МИНИМУМ цены (точка старта пампа), а не первую точку окна
+        min_snapshot = min(recent, key=lambda x: x[1])
+        price_start = min_snapshot[1]
+        start_timestamp = min_snapshot[0]
+        
         peak_snapshot = max(recent, key=lambda x: x[1])
         price_peak = peak_snapshot[1]
         peak_time = datetime.fromtimestamp(peak_snapshot[0]/1000)
@@ -227,9 +261,8 @@ class RestPumpDetector:
         
         increase_pct = ((price_peak - price_start) / price_start) * 100
         
-        # Точное время роста: от начала окна (price_start) до пика (price_peak)
+        # Точное время роста: от МИНИМУМА (старт пампа) до ПИКА
         peak_timestamp = peak_snapshot[0]
-        start_timestamp = recent[0][0]
         time_diff_seconds = (peak_timestamp - start_timestamp) / 1000
         time_diff_minutes = time_diff_seconds / 60
         
@@ -238,9 +271,19 @@ class RestPumpDetector:
 
         is_pump = False
         pump_type = ""
-
-        if time_since_peak > 1.5:
+        
+        # 🔥 FIX: Умная фильтрация "устаревших" пампов
+        # Раньше: если пик был > 1.5 мин назад = игнор (пропускали быстрые сливы!)
+        # Теперь: если пик был давно, НО цена УЖЕ упала от пика — это ХОРОШИЙ вход!
+        current_price = snapshots[-1][1]
+        drop_from_peak_pct = ((price_peak - current_price) / price_peak) * 100
+        
+        # Пропускаем ТОЛЬКО если: пик был > 5 мин назад И цена НЕ упала (всё ещё на хаях)
+        if time_since_peak > 5.0 and drop_from_peak_pct < 2.0:
             return False, 0, 0, ""
+        
+        # Если пик был 1-5 мин назад, но цена уже упала > 2% — это валидный сигнал!
+        # (Не отсекаем его, потому что разворот уже начался)
 
         # 🔥 TIER 1: MICRO PUMP (Нож)
         # Условие: +5% за 30 сек
@@ -401,12 +444,17 @@ class RestPumpDetector:
                 if should_notify:
                     await self.send_pump_alert(pump_data)
                 
-                # Запускаем анализ В ФОНЕ (только если еще не анализируем)
-                if symbol not in self.active_analyses:
+                # Запускаем анализ В ФОНЕ (только если еще не анализируем ИЛИ новый пик)
+                already_analyzing = symbol in self.active_analyses
+                new_higher_high = symbol in self.last_notified_peak and current_peak > self.last_notified_peak[symbol] * 1.05
+                
+                if not already_analyzing or new_higher_high:
+                    if new_higher_high:
+                        logger.info(f"🆕 {symbol}: Новый хай! Рестартую анализ.")
                     self.active_analyses.add(symbol)
                     asyncio.create_task(self._analyze_with_notification(symbol, pump_data, now))
                 else:
-                    logger.debug(f"🔄 {symbol}: Анализ уже идёт, пропускаем запуск дубля")
+                    logger.debug(f"🔄 {symbol}: Анализ уже идёт, пропускаем")
         
         logger.info(f"📊 Скан #{self.scan_count}: {pumps_found} пампов | Всего: {self.pump_count} пампов, {self.signal_count} сигналов")
     
@@ -563,10 +611,54 @@ class RestPumpDetector:
             
             # === SMART SL/TP CALCULATION ===
             
-            # Попытка получить стакан и свечи для точности
-            orderbook = self.signal_generator.previous_orderbooks.get(symbol)
             start_price = pump_data.get('price_start', entry_price * 0.8)
             actual_time = pump_data.get('actual_time_minutes', 5.0)
+            
+            # 🔥 BTC CORRELATION CHECK
+            btc_score = 5.0
+            btc_emoji = "➡️"
+            try:
+                async with self.session.get(f"{self.rest_url}/api/v1/contract/ticker?symbol=BTC_USDT") as resp:
+                    if resp.status == 200:
+                        btc_data = await resp.json()
+                        if btc_data.get('success'):
+                            ticker = btc_data.get('data', {})
+                            btc_change = float(ticker.get('riseFallRate', 0)) * 100  # % change 24h
+                            if btc_change <= -3:
+                                btc_score = 9.0  # BTC dumping hard = GREAT for short
+                                btc_emoji = "📉"
+                            elif btc_change <= -1:
+                                btc_score = 7.0  # BTC falling = good for short
+                                btc_emoji = "📉"
+                            elif btc_change >= 3:
+                                btc_score = 2.0  # BTC pumping = risky for short
+                                btc_emoji = "📈"
+                            elif btc_change >= 1:
+                                btc_score = 4.0  # BTC rising = less ideal
+                                btc_emoji = "📈"
+            except Exception as btc_err:
+                logger.debug(f"BTC check error: {btc_err}")
+            
+            # 🔥 FETCH FRESH ORDERBOOK
+            orderbook = None
+            ob_analysis = None
+            try:
+                ob_url = f"{self.rest_url}/api/v1/contract/depth/{symbol}"
+                async with self.session.get(ob_url, params={"limit": 50}) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get('success'):
+                            ob_data = data.get('data', {})
+                            orderbook = {
+                                "asks": ob_data.get('asks', []),
+                                "bids": ob_data.get('bids', [])
+                            }
+                            # 🔥 ULTRA ORDERBOOK ANALYSIS
+                            ob_analysis = self.ultra_ob.analyze(orderbook, entry_price)
+                            if ob_analysis.get("short_score", 5) >= 6:
+                                logger.info(f"📊 {symbol}: Ultra OB Score {ob_analysis['short_score']:.1f}/10 | {ob_analysis.get('summary', '')}")
+            except Exception as ob_err:
+                logger.debug(f"Ошибка получения стакана: {ob_err}")
             
             # Получаем свечи для анализа формы и ATR
             klines = []
@@ -576,7 +668,17 @@ class RestPumpDetector:
                     if resp.status == 200:
                         data = await resp.json()
                         if data.get('success'):
-                            klines = data.get('data', [])
+                            raw_klines = data.get('data', [])
+                            for k in raw_klines:
+                                if isinstance(k, dict):
+                                    klines.append([
+                                        k.get('time', 0),
+                                        float(k.get('open', 0)),
+                                        float(k.get('high', 0)),
+                                        float(k.get('low', 0)),
+                                        float(k.get('close', 0)),
+                                        float(k.get('vol', 0))
+                                    ])
             except Exception as ke:
                 logger.debug(f"Не удалось получить свечи для Smart TP: {ke}")
 
@@ -589,6 +691,19 @@ class RestPumpDetector:
                 klines=klines,
                 orderbook=orderbook
             )
+            
+            # 🔥 OVERRIDE TPs FROM ORDERBOOK IF AVAILABLE
+            if ob_analysis and ob_analysis.get("tp_targets"):
+                ob_tps = self.ultra_ob.get_optimal_tps_from_orderbook(ob_analysis, entry_price)
+                if ob_tps:
+                    # Смешиваем: 50% Фибо + 50% ордербук
+                    fib_tps = smart_levels['take_profits']
+                    smart_levels['take_profits'] = [
+                        (fib_tps[0] + ob_tps[0]) / 2,
+                        (fib_tps[1] + ob_tps[1]) / 2,
+                        (fib_tps[2] + ob_tps[2]) / 2
+                    ]
+                    logger.info(f"📊 {symbol}: TP скорректированы по ликвидности стакана")
             
             sl = smart_levels['stop_loss']
             tps = smart_levels['take_profits']
@@ -606,15 +721,155 @@ class RestPumpDetector:
             dominator_score = analysis.get('dominator_score', 5.0)
             domination_signal = analysis.get('domination_signal', 'NEUTRAL')
             final_mult = analysis.get('final_multiplier', 1.0)
+            
+            # 🔥 OPEN INTEREST ANALYSIS
+            oi_score = 5.0
+            oi_emoji = "➡️"
+            try:
+                oi_result = await self.oi_analyzer.analyze(symbol, self.session)
+                if oi_result.get('oi_change'):
+                    oi_score = oi_result.get('oi_score', 5.0)
+                    oi_trend = oi_result['oi_change'].get('oi_trend', 'stable')
+                    if oi_trend == 'falling':
+                        oi_emoji = "🔻"  # OI падает = хорошо
+                    elif oi_trend == 'rising':
+                        oi_emoji = "🔺"  # OI растёт = осторожно
+            except Exception as oi_err:
+                logger.debug(f"OI analysis error: {oi_err}")
+            
+            # 🔥 FUNDING RATE ANALYSIS
+            funding_score = 5.0
+            funding_emoji = "➡️"
+            try:
+                async with self.session.get(f"{self.rest_url}/api/v1/contract/funding_rate/{symbol}") as resp:
+                    if resp.status == 200:
+                        f_data = await resp.json()
+                        if f_data.get('success'):
+                            fr = float(f_data.get('data', {}).get('fundingRate', 0))
+                            fr_pct = fr * 100
+                            if fr_pct >= 0.10:
+                                funding_score = 9.0
+                                funding_emoji = "🔥"
+                            elif fr_pct >= 0.05:
+                                funding_score = 7.0
+                                funding_emoji = "✅"
+                            elif fr_pct > 0:
+                                funding_score = 5.0
+                                funding_emoji = "➡️"
+                            else:
+                                funding_score = 2.0
+                                funding_emoji = "⚠️"
+            except Exception as fr_err:
+                logger.debug(f"Funding rate error: {fr_err}")
+            
+            # 🔥 ORDERBOOK SCORE
+            ob_score = ob_analysis.get('short_score', 5.0) if ob_analysis else 5.0
+            
+            # 🔥 LIQUIDATION HEATMAP
+            liq_score = 5.0
+            liq_analysis = None
+            try:
+                liq_analysis = self.liq_heatmap.calculate_liquidation_zones(
+                    current_price=entry_price,
+                    peak_price=peak_price,
+                    start_price=start_price
+                )
+                liq_score = liq_analysis.get('liq_score', 5.0)
+                if liq_score >= 7:
+                    logger.info(f"🔥 {symbol}: Liquidation Heatmap Score {liq_score:.1f}/10 - {self.liq_heatmap.get_summary(liq_analysis)}")
+            except Exception as liq_err:
+                logger.debug(f"Liquidation heatmap error: {liq_err}")
+            
+            # ⏱️ MULTI-TIMEFRAME ANALYSIS
+            mtf_score = 5.0
+            try:
+                mtf_result = await self.mtf_analyzer.analyze(symbol, self.session)
+                mtf_score = mtf_result.get('short_score', 5.0)
+                if mtf_result.get('confluence') in ['STRONG_SHORT', 'AVOID_SHORT']:
+                    logger.info(f"⏱️ {symbol}: {mtf_result.get('summary', '')}")
+            except Exception as mtf_err:
+                logger.debug(f"MTF analysis error: {mtf_err}")
+            
+            # 📊 VOLUME PROFILE
+            vol_score = 5.0
+            try:
+                vol_result = await self.volume_analyzer.analyze(symbol, entry_price, self.session)
+                vol_score = vol_result.get('score', 5.0)
+            except Exception as vol_err:
+                logger.debug(f"Volume profile error: {vol_err}")
+            
+            # � CROSS-PAIR CORRELATION
+            cross_score = 5.0
+            try:
+                cross_result = await self.cross_pair_analyzer.analyze(symbol, self.session)
+                cross_score = cross_result.get('score', 5.0)
+                if cross_result.get('correlation') in ['SECTOR_PUMP', 'SECTOR_DUMP']:
+                    logger.info(f"🔗 {symbol}: {cross_result.get('summary', '')}")
+            except Exception as cross_err:
+                logger.debug(f"Cross-pair error: {cross_err}")
+            
+            # �🔥 COMBINED QUALITY SCORE (0-10) - 10 метрик!
+            combined_score = (god_eye_score + dominator_score + oi_score + funding_score + 
+                             ob_score + btc_score + liq_score + mtf_score + vol_score + cross_score) / 10
+            
+            # 🧠 GOD BRAIN v2.0: SMART PREDICTION (максимальный интеллект)
+            smart_pred = self.god_brain.get_smart_prediction(symbol, increase_pct, combined_score)
+            adjusted_score = smart_pred['final_score']  # Уже скорректированный score
+            
+            # 🤖 ML PREDICTOR: Машинное обучение для вероятности WIN
+            ml_prob = 0.5
+            try:
+                ml_result = self.ml_predictor.predict({
+                    'pump_pct': increase_pct,
+                    'combined_score': combined_score,
+                    'god_eye_score': god_eye_score,
+                    'dominator_score': dominator_score,
+                    'orderbook_score': ob_score,
+                    'oi_score': oi_score,
+                    'funding_score': funding_score,
+                    'btc_score': btc_score,
+                    'liq_score': liq_score
+                })
+                ml_prob = ml_result.get('probability', 0.5)
+                if ml_result.get('confidence') != 'NO_MODEL':
+                    logger.info(f"🤖 {symbol}: ML WIN prob {ml_prob*100:.0f}% | {ml_result.get('recommendation', '')}")
+                    # Blend ML с GOD BRAIN (50/50)
+                    ml_score = ml_prob * 10  # Конвертируем 0-1 в 0-10
+                    adjusted_score = (adjusted_score + ml_score) / 2
+            except Exception as ml_err:
+                logger.debug(f"ML prediction error: {ml_err}")
+            
+            # Логируем финальный результат
+            if smart_pred['confidence'] >= 50:
+                reasoning_str = " | ".join(smart_pred['reasoning'][:2]) if smart_pred['reasoning'] else ""
+                logger.info(f"🧠 {symbol}: {smart_pred['prediction']} (conf:{smart_pred['confidence']}%) | Final Score:{adjusted_score:.1f}/10 | {reasoning_str}")
+            
+            # ⚠️ AVOID WARNING: если история плохая, логируем предупреждение
+            if smart_pred['prediction'] == 'AVOID' and smart_pred['confidence'] >= 70:
+                logger.warning(f"⚠️ {symbol}: GOD BRAIN рекомендует AVOID но сигнал отправлен (WR слишком низкая)")
+            
+            # Используем adjusted_score для label
+            if adjusted_score >= 8:
+                quality_label = "🏆 A-TIER"
+            elif adjusted_score >= 6:
+                quality_label = "✅ B-TIER"
+            else:
+                quality_label = "⚠️ C-TIER"
+            
+            # 🧠 Корректируем TP по истории монеты
+            adjusted_tps = self.god_brain.get_adjusted_tps(symbol, tps, entry_price)
+            if adjusted_tps != tps:
+                logger.info(f"🧠 {symbol}: TP скорректированы по истории монеты")
+                tps = adjusted_tps
 
             msg = f"""
-📉 *SHORT*
+�📉 *SHORT* | {quality_label}
 
 `{symbol}`
 Вход: `{entry_price:.8f}`
+Памп: +{increase_pct:.1f}%
 
-▸ Памп: +{increase_pct:.1f}%
-▸ Качество: {god_eye_score:.0f}/10 {god_eye_quality}
+▸ Качество: *{adjusted_score:.1f}/10*
 
 ━━━━━━━━━━━━━━━
 
@@ -664,6 +919,38 @@ class RestPumpDetector:
                     entry_price=entry_price,
                     peak_price=peak_price,
                     pump_pct=increase_pct
+                )
+                
+                # 🧠 GOD BRAIN: Записываем сигнал для обучения
+                self.god_brain.record_signal({
+                    'symbol': symbol,
+                    'pump_pct': increase_pct,
+                    'pump_speed_minutes': pump_data.get('actual_time_minutes', 5.0),
+                    'entry_price': entry_price,
+                    'peak_price': peak_price,
+                    'start_price': pump_data.get('price_start', entry_price * 0.8),
+                    'god_eye_score': god_eye_score,
+                    'dominator_score': dominator_score,
+                    'orderbook_score': ob_score,
+                    'oi_score': oi_score,
+                    'funding_score': funding_score,
+                    'btc_score': btc_score,
+                    'liq_score': liq_score,
+                    'combined_score': combined_score,
+                    'sl_price': sl,
+                    'tp1_price': tps[0] if tps else None,
+                    'tp2_price': tps[1] if len(tps) > 1 else None,
+                    'tp3_price': tps[2] if len(tps) > 2 else None
+                })
+                
+                # 📈 TRAILING TP: Регистрируем позицию для trailing
+                signal_id = f"{symbol}_{datetime.now().timestamp()}"
+                self.trailing_tracker.add_position(
+                    signal_id=signal_id,
+                    symbol=symbol,
+                    entry_price=entry_price,
+                    sl_price=sl,
+                    initial_tps=tps
                 )
             except Exception as db_err:
                 logger.warning(f"⚠️ Ошибка БД (instant): {db_err}")
