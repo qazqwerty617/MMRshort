@@ -866,16 +866,26 @@ class RestPumpDetector:
             elif adjusted_score >= 6:
                 quality_label = "✅ B-TIER"
             else:
-                quality_label = "⚠️ C-TIER"
+                # 🚫 C-TIER — не отправляем сигнал
+                logger.info(f"⚠️ {symbol}: C-TIER ({adjusted_score:.1f}/10) — сигнал пропущен")
+                return
             
             # 🧠 Корректируем TP по истории монеты
             adjusted_tps = self.god_brain.get_adjusted_tps(symbol, tps, entry_price)
             if adjusted_tps != tps:
                 logger.info(f"🧠 {symbol}: TP скорректированы по истории монеты")
                 tps = adjusted_tps
+            
+            # 📊 Сортируем TP по возрастанию профита (для шорта: чем ниже цена - тем больше профит)
+            tps = sorted(tps)  # Сортируем по возрастанию цены (TP1 самый близкий, TP3 самый далёкий)
+            
+            # Пересчитываем % для отсортированных TP
+            tp1_pct_diff = ((tps[0] - entry_price) / entry_price) * 100
+            tp2_pct_diff = ((tps[1] - entry_price) / entry_price) * 100
+            tp3_pct_diff = ((tps[2] - entry_price) / entry_price) * 100
 
             msg = f"""
-�📉 *SHORT* | {quality_label}
+📉 *SHORT* | {quality_label}
 
 `{symbol}`
 Вход: `{entry_price:.8f}`
