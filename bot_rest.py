@@ -286,14 +286,26 @@ class RestPumpDetector:
             volume = ticker_data["volume"]
             timestamp = ticker_data["timestamp"]
             
-            # 🔥 ОПТИМИЗАЦИЯ ПАМЯТИ: Downsampling
-            # Сохраняем точку только если прошло > 5 сек с последней записи
-            # Это дает нам историю в 20 мин (240 точек) без перегрузки памяти
-            if not self.price_snapshots[symbol] or (timestamp - self.price_snapshots[symbol][-1][0]) > 5000:
+            # 🔥 ОПТИМИЗАЦИЯ ПАМЯТИ: Умный Downsampling (Anchor + Drifting Head)
+            if not self.price_snapshots[symbol]:
                 self.price_snapshots[symbol].append((timestamp, price, volume))
+            elif len(self.price_snapshots[symbol]) == 1:
+                # Если точка всего одна - это старт. Нам нужна вторая, чтобы была история.
+                # Ждем 1 сек и добавляем вторую.
+                if (timestamp - self.price_snapshots[symbol][0][0]) > 1000:
+                    self.price_snapshots[symbol].append((timestamp, price, volume))
             else:
-                 # Всегда обновляем последнюю точку, чтобы иметь актуальную цену
-                 self.price_snapshots[symbol][-1] = (timestamp, price, volume)
+                # Если есть история (2+ точки)
+                # snapshots[-2] - это "зафиксированная" историческая точка
+                # snapshots[-1] - это "текущая" плавающая точка
+                prev_historical_time = self.price_snapshots[symbol][-2][0]
+                
+                if (timestamp - prev_historical_time) > 5000:
+                    # Прошло > 5 сек от зафиксированной точки -> фиксируем текущую и создаем новую
+                    self.price_snapshots[symbol].append((timestamp, price, volume))
+                else:
+                    # Прошло < 5 сек -> обновляем текущую точку (Drifting Head), чтобы цена была актуальной
+                    self.price_snapshots[symbol][-1] = (timestamp, price, volume)
             
             cutoff_time = timestamp - (self.timeframe_minutes * 2 * 60 * 1000)
             self.price_snapshots[symbol] = [
