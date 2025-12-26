@@ -70,6 +70,7 @@ class RestPumpDetector:
         self.signal_cooldown = {}
         self.active_analyses = set()  # Множество активных задач анализа (чтобы не запускать дубли)
         self.last_notified_peak = {}  # symbol -> last peak price we notified about
+        self.last_notified_type = {}  # symbol -> last pump type (MICRO/FAST/MASSIVE)
         self.cooldown_minutes = 2
         self.repeat_pump_threshold = 10.0  # Повторное уведомление только при +10% от последнего пика
         self.no_signal_cooldown = {}  # Cooldown для уведомлений "ТВХ не найдена"
@@ -248,8 +249,8 @@ class RestPumpDetector:
             pump_type = "MICRO_PUMP"
             
         # 🔥 TIER 2: FAST IMPULSE
-        # Условие: +10% за 10 мин
-        elif increase_pct >= 10.0 and time_diff_minutes <= 10.0:
+        # Условие: +10% за 5 мин
+        elif increase_pct >= 10.0 and time_diff_minutes <= 5.0:
             is_pump = True
             pump_type = "FAST_IMPULSE"
             
@@ -328,15 +329,31 @@ class RestPumpDetector:
                 current_peak = max(s[1] for s in self.price_snapshots[symbol][-50:])
                 
                 # Проверяем: было ли уже уведомление о пампе этой монеты?
+                pump_type = pump_result[3]
+                last_type = self.last_notified_type.get(symbol, "")
+                
+                tier_values = {"": 0, "MICRO_PUMP": 1, "FAST_IMPULSE": 2, "MASSIVE": 3}
+                current_tier = tier_values.get(pump_type, 0)
+                last_tier = tier_values.get(last_type, 0)
+
+                should_notify = True
+                
                 if symbol in self.last_notified_peak:
                     last_peak = self.last_notified_peak[symbol]
                     peak_increase = ((current_peak - last_peak) / last_peak) * 100
                     
-                    # Уведомляем только если пик вырос на 10%+ от последнего
-                    if peak_increase < self.repeat_pump_threshold:
-                        should_notify = False
+                    # Логика повторного уведомления:
+                    # 1. Если TIER повысился (например, Micro -> Fast) -> УВЕДОМЛЯЕМ СРАЗУ
+                    if current_tier > last_tier:
+                         logger.info(f"🆙 {symbol}: Level Up! {last_type} -> {pump_type}")
+                         should_notify = True
+                    # 2. Если TIER тот же, но цена выросла еще на 10% -> УВЕДОМЛЯЕМ
+                    elif peak_increase >= self.repeat_pump_threshold:
+                         logger.info(f"📈 {symbol}: Новый пик +{peak_increase:.1f}% от последнего ({last_peak:.6f} -> {current_peak:.6f})")
+                         should_notify = True
+                    # 3. Иначе молчим
                     else:
-                        logger.info(f"📈 {symbol}: Новый пик +{peak_increase:.1f}% от последнего ({last_peak:.6f} -> {current_peak:.6f})")
+                         should_notify = False
                 
                 # Также проверяем cooldown по времени
                 if symbol in self.pump_cooldown and should_notify:
@@ -354,6 +371,7 @@ class RestPumpDetector:
                     self.pump_count += 1
                     self.pump_cooldown[symbol] = now
                     self.last_notified_peak[symbol] = current_peak  # Запоминаем пик
+                    self.last_notified_type[symbol] = pump_result[3] # Запоминаем тип пампа (Tier)
                 
                 increase_pct = pump_result[1]
                 time_minutes = pump_result[2]
