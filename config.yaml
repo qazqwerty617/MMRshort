@@ -25,11 +25,11 @@ monitoring:
 
 # ============ ПАРАМЕТРЫ ОБНАРУЖЕНИЯ ПАМПА ============
 pump_detection:
-  min_price_increase_pct: 7.0   # Видим всё от 7%
+  min_price_increase_pct: 20.0  # Базовый порог для MASSIVE (20% за 20 мин)
   max_price_increase_pct: 300.0
-  timeframe_minutes: 20          # За 20 минут
-  min_volume_spike: 1.2          # Чуть снизили требование к всплеску
-  min_volume_usd: 10000          # Пылесосим и низколиквид
+  timeframe_minutes: 20          # Окно анализа
+  min_volume_spike: 1.2
+  min_volume_usd: 10000          # Объём оставляем низкий ($10k)
 
 # ============ ПАРАМЕТРЫ АНАЛИЗА ВХОДА В ШОРТ ============
 short_entry:

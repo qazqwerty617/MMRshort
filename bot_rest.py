@@ -241,16 +241,23 @@ class RestPumpDetector:
         if time_since_peak > 1.5:
             return False, 0, 0, ""
 
-        # 🔥 MICRO_PUMP: Быстрый импульс +5%+ за 30-60 сек (ножи!)
-        if increase_pct >= 5.0 and time_diff_minutes <= 1.0:
+        # 🔥 TIER 1: MICRO PUMP (Нож)
+        # Условие: +5% за 30 сек
+        if increase_pct >= 5.0 and time_diff_minutes <= 0.5:
             is_pump = True
-            pump_type = "MICRO_PUMP"  # Нож!
-        elif increase_pct >= self.min_pump_pct:
-            is_pump = True
-            pump_type = "MASSIVE"
-        elif increase_pct >= 10.0 and time_diff_minutes <= 5.0:
+            pump_type = "MICRO_PUMP"
+            
+        # 🔥 TIER 2: FAST IMPULSE
+        # Условие: +10% за 10 мин
+        elif increase_pct >= 10.0 and time_diff_minutes <= 10.0:
             is_pump = True
             pump_type = "FAST_IMPULSE"
+            
+        # 🔥 TIER 3: MASSIVE PUMP
+        # Условие: +20% за 20 мин (стандарт)
+        elif increase_pct >= 20.0: # (self.min_pump_pct)
+            is_pump = True
+            pump_type = "MASSIVE"
 
         if is_pump:
             if pump_type == "MICRO_PUMP":
@@ -654,7 +661,8 @@ class RestPumpDetector:
 ◈ *Pump Detected*
 
 `{pump_data['symbol']}`
-+{pump_data['increase_pct']:.1f}% in {actual_time:.0f}m
++{pump_data['increase_pct']:.1f}% in {actual_time:.1f}m
+`{pump_data['price_start']:.8f}` ➔ `{pump_data['price_peak']:.8f}`
 
 _Analyzing..._
 """
