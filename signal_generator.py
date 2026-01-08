@@ -317,10 +317,6 @@ class SignalGenerator:
         grade = signal.get('signal_grade', 'B')
         grade_text = "PREMIUM" if grade == 'A' else "STANDARD" if grade == 'B' else "RISKY"
         
-        # SL/TP
-        stop_loss = signal.get('stop_loss', entry_price * 1.05)
-        take_profits = signal.get('take_profits', [entry_price * 0.95, entry_price * 0.9, entry_price * 0.85])
-        
         msg = f"""
 📉 *SHORT*   |   {grade}-TIER
 
@@ -329,14 +325,6 @@ class SignalGenerator:
 
 ▸ Памп: +{signal.get('pump_increase_pct', 0):.1f}%
 ▸ Качество: {quality:.0f}/10 {self._get_stars(quality)}
-
-━━━━━━━━━━━━━━━
-
-🛑 SL: `{stop_loss:.8f}` _(+{((stop_loss - entry_price)/entry_price*100):.1f}%)_
-
-✅ TP1: `{take_profits[0]:.8f}` _({((take_profits[0] - entry_price)/entry_price*100):.1f}%)_
-✅ TP2: `{take_profits[1]:.8f}` _({((take_profits[1] - entry_price)/entry_price*100):.1f}%)_
-✅ TP3: `{take_profits[2]:.8f}` _({((take_profits[2] - entry_price)/entry_price*100):.1f}%)_
 """
         return msg
     

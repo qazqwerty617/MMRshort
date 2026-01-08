@@ -856,14 +856,6 @@ class RestPumpDetector:
 Памп: +{increase_pct:.1f}%
 
 ▸ Качество: *{adjusted_score:.1f}/10*
-
-━━━━━━━━━━━━━━━
-
-🛑 SL: `{sl:.8f}` _(+{sl_pct_diff:.1f}%)_
-
-✅ TP1: `{tps[0]:.8f}` _({tp1_pct_diff:.1f}%)_
-✅ TP2: `{tps[1]:.8f}` _({tp2_pct_diff:.1f}%)_
-✅ TP3: `{tps[2]:.8f}` _({tp3_pct_diff:.1f}%)_
 """
             
             mexc_url = f"https://futures.mexc.com/exchange/{symbol}?type=linear_swap"
