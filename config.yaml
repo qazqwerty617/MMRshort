@@ -3,7 +3,8 @@
 # ============ НАСТРОЙКИ TELEGRAM ============
 telegram:
   bot_token: "8315354749:AAFcU0LzGUkMCe2Qodl2w9DpIuP1oGZv-vU"
-  chat_id: "8460086736"
+  chat_id: "-1003240346405"  # ID группы
+  topic_id: 31  # ID темы (треда) в группе
   message_format: "markdown"
 
 # ============ НАСТРОЙКИ MEXC API ============

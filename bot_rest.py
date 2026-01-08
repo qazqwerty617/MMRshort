@@ -62,8 +62,7 @@ class RestPumpDetector:
         # Telegram
         self.telegram_token = self.config['telegram']['bot_token']
         self.chat_id = self.config['telegram']['chat_id']
-        # Поддержка нескольких пользователей
-        self.chat_ids = [self.chat_id, "340517348", "1626903540", "438484136", "5158984897"] # Hardcoded extra users
+        self.topic_id = self.config['telegram'].get('topic_id')  # ID темы в группе
         self.app = None
         
         # REST API
@@ -1337,18 +1336,9 @@ _Бот запущен и готов к работе!_ 🚀
 
     async def announce_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
-        Команда /announce - отправить объявление всем пользователям
-        Только для админа (chat_id из config)
+        Команда /announce - отправить объявление в группу
         """
-        user_id = str(update.effective_user.id)
-        admin_id = str(self.chat_id)  # Админ из конфига
-        
-        # Проверка прав
-        if user_id != admin_id:
-            await update.message.reply_text("⛔ Только админ может отправлять объявления!")
-            return
-        
-        # Получаем сообщение (даже если это edited_message)
+        # Получаем сообщение
         message = update.effective_message
         if not message:
             return
@@ -1376,45 +1366,35 @@ _Бот запущен и готов к работе!_ 🚀
             await update.message.reply_text("⚠️ Пустое сообщение!")
             return
         
-        # Форматируем объявление (пересылаем текст как есть!)
+        # Форматируем объявление
         msg = f"📢 *ОБЪЯВЛЕНИЕ*\n\n{announcement_text}\n\n_— Админ MMR Bot_"
         
-        # Отправляем всем
-        success_count = 0
-        fail_count = 0
-        
-        for chat_id in self.chat_ids:
-            try:
-                await self.app.bot.send_message(
-                    chat_id=chat_id,
-                    text=msg,
-                    parse_mode='Markdown'
-                )
-                success_count += 1
-            except Exception as e:
-                logger.error(f"Ошибка отправки {chat_id}: {e}")
-                fail_count += 1
-        
-        await update.message.reply_text(
-            f"✅ Объявление отправлено!\n\n"
-            f"Успешно: {success_count}\n"
-            f"Ошибок: {fail_count}",
-            parse_mode='Markdown'
-        )
-
+        # Отправляем в группу
+        try:
+            await self.app.bot.send_message(
+                chat_id=self.chat_id,
+                message_thread_id=self.topic_id,
+                text=msg,
+                parse_mode='Markdown'
+            )
+            await update.message.reply_text("✅ Объявление отправлено в группу!")
+        except Exception as e:
+            logger.error(f"Ошибка отправки объявления: {e}")
+            await update.message.reply_text(f"❌ Ошибка: {e}")
+    
     async def broadcast_message(self, text: str, parse_mode='Markdown', reply_markup=None, disable_web_page_preview=True):
-        """Отправить сообщение всем пользователям"""
-        for chat_id in self.chat_ids:
-            try:
-                await self.app.bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    parse_mode=parse_mode,
-                    reply_markup=reply_markup,
-                    disable_web_page_preview=disable_web_page_preview
-                )
-            except Exception as e:
-                logger.error(f"Ошибка отправки пользователю {chat_id}: {e}")
+        """Отправить сообщение в группу (в указанную тему)"""
+        try:
+            await self.app.bot.send_message(
+                chat_id=self.chat_id,
+                message_thread_id=self.topic_id,
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+                disable_web_page_preview=disable_web_page_preview
+            )
+        except Exception as e:
+            logger.error(f"Ошибка отправки в группу: {e}")
     
     async def send_daily_report(self):
         """Ежедневный отчёт о работе бота"""
