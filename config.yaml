@@ -25,7 +25,7 @@ monitoring:
 
 # ============ ПАРАМЕТРЫ ОБНАРУЖЕНИЯ ПАМПА ============
 pump_detection:
-  min_price_increase_pct: 20.0  # Базовый порог для MASSIVE (20% за 20 мин)
+  min_price_increase_pct: 20.0  # 🎯 ELITE: Пампы 20%+
   max_price_increase_pct: 300.0
   timeframe_minutes: 20          # Окно анализа
   min_volume_spike: 1.2

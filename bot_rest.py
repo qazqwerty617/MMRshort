@@ -93,14 +93,14 @@ class RestPumpDetector:
         self.last_notified_peak = {}  # symbol -> last peak price we notified about
         self.last_notified_type = {}  # symbol -> last pump type (MICRO/FAST/MASSIVE)
         self.logged_pumps = {}  # symbol -> timestamp of last log (to prevent spam)
-        self.cooldown_minutes = 2
-        self.repeat_pump_threshold = 10.0  # Повторное уведомление только при +10% от последнего пика
+        self.cooldown_minutes = 0  # 🚀 INSTANT: Без cooldown - мгновенные уведомления!
+        self.repeat_pump_threshold = 3.0  # Повторное уведомление при +3% от пика
         self.no_signal_cooldown = {}  # Cooldown для уведомлений "ТВХ не найдена"
         
         # Параметры детекции
         self.min_pump_pct = self.config['pump_detection']['min_price_increase_pct']
         self.timeframe_minutes = self.config['pump_detection']['timeframe_minutes']
-        self.scan_interval = 0.1  # TURBO MAX: 0.1 сек (почти без пауз)
+        self.scan_interval = 0.05  # 🚀 TURBO MAX++: 0.05 сек (20 сканов/сек!)
         
         
         # Детектор новых листингов
@@ -286,45 +286,13 @@ class RestPumpDetector:
         # Если пик был 1-5 мин назад, но цена уже упала > 2% — это валидный сигнал!
         # (Не отсекаем его, потому что разворот уже начался)
 
-        # 🔥 TIER 1: MICRO PUMP (Нож)
-        # Условие: +5% за 30 сек
-        if increase_pct >= 5.0 and time_diff_minutes <= 0.5:
+        # 🎯 ELITE: +20% = ПАМП!
+        if increase_pct >= 20.0:
             is_pump = True
-            pump_type = "MICRO_PUMP"
-            
-        # 🔥 TIER 2: FAST IMPULSE
-        # Условие: +10% за 5 мин
-        elif increase_pct >= 10.0 and time_diff_minutes <= 5.0:
-            is_pump = True
-            pump_type = "FAST_IMPULSE"
-            
-        # 🔥 TIER 3: MASSIVE PUMP
-        # Условие: +20% за 20 мин (стандарт)
-        elif increase_pct >= 20.0: # (self.min_pump_pct)
-            is_pump = True
-            pump_type = "MASSIVE"
+            pump_type = "ELITE"
 
         if is_pump:
-            # Проверяем cooldown для логирования (чтобы не спамить)
-            now = datetime.now()
-            last_log = self.logged_pumps.get(symbol)
-            should_log = last_log is None or (now - last_log).total_seconds() > 30
-            
-            if pump_type == "MICRO_PUMP":
-                pump_emoji = "🔪"  # Нож
-                if should_log:
-                    logger.warning(f"🔪 MICRO_PUMP (НОЖ!): {symbol} +{increase_pct:.2f}% за {time_diff_seconds:.0f} сек!")
-                    self.logged_pumps[symbol] = now
-            elif pump_type == "MASSIVE":
-                pump_emoji = "🚀"
-                if should_log:
-                    logger.warning(f"{pump_type} {pump_emoji}: {symbol} +{increase_pct:.2f}% за {time_diff_minutes:.1f}мин")
-                    self.logged_pumps[symbol] = now
-            else:
-                pump_emoji = "⚡️"
-                if should_log:
-                    logger.warning(f"{pump_type} {pump_emoji}: {symbol} +{increase_pct:.2f}% за {time_diff_minutes:.1f}мин")
-                    self.logged_pumps[symbol] = now
+            logger.warning(f"🚀 PUMP DETECTED: {symbol} +{increase_pct:.1f}% за {time_diff_minutes:.1f}мин")
             return True, increase_pct, time_diff_minutes, pump_type
 
         return False, 0, 0, ""
@@ -416,10 +384,7 @@ class RestPumpDetector:
                     if time_since_last < self.cooldown_minutes:
                         should_notify = False
                 
-                if symbol in self.signal_cooldown:
-                    time_since_signal = (now - self.signal_cooldown[symbol]).total_seconds() / 60
-                    if time_since_signal < 30:
-                        continue
+                # 🚀 INSTANT MODE: Убран signal_cooldown - уведомляем о каждом пампе!
 
                 pumps_found += 1
                 if should_notify:
@@ -1450,6 +1415,58 @@ _Бот запущен и готов к работе!_ 🚀
                 )
             except Exception as e:
                 logger.error(f"Ошибка отправки пользователю {chat_id}: {e}")
+    
+    async def send_daily_report(self):
+        """Ежедневный отчёт о работе бота"""
+        try:
+            stats = self.signal_tracker.get_statistics()
+            brain_stats = self.god_brain.get_statistics()
+            
+            total_pumps = self.pump_count
+            total_signals = self.signal_count
+            wr = brain_stats.get('win_rate', 0) * 100
+            
+            msg = f"""
+📊 **ЕЖЕДНЕВНЫЙ ОТЧЁТ**
+━━━━━━━━━━━━━━━
+
+🚀 Пампов обнаружено: `{total_pumps}`
+🎯 Сигналов отправлено: `{total_signals}`
+
+📈 **Результаты:**
+✅ WIN: `{brain_stats.get('wins', 0)}`
+❌ LOSS: `{brain_stats.get('losses', 0)}`
+📊 Win Rate: **{wr:.1f}%**
+
+💰 Средний профит: `{stats.get('avg_profit', 0):.1f}%`
+🎲 Активных трекингов: `{stats.get('active_tracking', 0)}`
+"""
+            
+            if stats.get('best_coins'):
+                msg += "\n🏆 **Топ монеты:**\n"
+                for sym, profit, wins, losses in stats['best_coins'][:3]:
+                    msg += f"  • {sym}: +{profit:.1f}% ({wins}W/{losses}L)\n"
+            
+            await self.broadcast_message(msg)
+            logger.info("📊 Ежедневный отчёт отправлен")
+            
+        except Exception as e:
+            logger.error(f"Ошибка отправки ежедневного отчёта: {e}")
+    
+    async def auto_reports_loop(self):
+        """Фоновая задача для автоматических отчётов"""
+        while True:
+            try:
+                now = datetime.now()
+                # Отправляем отчёт в 23:59
+                if now.hour == 23 and now.minute == 59:
+                    await self.send_daily_report()
+                    await asyncio.sleep(120)  # Спим 2 мин чтобы не дублировать
+                else:
+                    await asyncio.sleep(60)  # Проверяем каждую минуту
+            except Exception as e:
+                logger.error(f"Ошибка в auto_reports_loop: {e}")
+                await asyncio.sleep(60)
 
     async def run(self):
         """Запуск бота"""
@@ -1480,6 +1497,9 @@ _Бот запущен и готов к работе!_ 🚀
         
         # Запускаем трекер сигналов в фоне
         tracker_task = asyncio.create_task(self.signal_tracker.run())
+        
+        # 📊 Запускаем автоматические отчёты
+        reports_task = asyncio.create_task(self.auto_reports_loop())
         
         try:
             while True:
