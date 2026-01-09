@@ -93,12 +93,18 @@ class RestPumpDetector:
         self.last_notified_type = {}  # symbol -> last pump type (MICRO/FAST/MASSIVE)
         self.logged_pumps = {}  # symbol -> timestamp of last log (to prevent spam)
         self.cooldown_minutes = 0  # 🚀 INSTANT: Без cooldown - мгновенные уведомления!
-        self.repeat_pump_threshold = 3.0  # Повторное уведомление при +3% от пика
+        self.repeat_pump_threshold = self.config['pump_detection'].get('repeat_signal_threshold', 10.0)  # 📢 Повторный сигнал при +10% от пика
         self.no_signal_cooldown = {}  # Cooldown для уведомлений "ТВХ не найдена"
         
-        # Параметры детекции
-        self.min_pump_pct = self.config['pump_detection']['min_price_increase_pct']
-        self.timeframe_minutes = self.config['pump_detection']['timeframe_minutes']
+        # 🚀 ПАРАМЕТРЫ ДЕТЕКЦИИ ПАМПОВ
+        # FAST PUMP: 10%+ за ≤5 минут (ювелирные быстрые пампы)
+        self.fast_pump_pct = self.config['pump_detection']['fast_pump']['min_increase_pct']
+        self.fast_pump_timeframe = self.config['pump_detection']['fast_pump']['max_timeframe_minutes']
+        
+        # ELITE PUMP: 20%+ за ≤20 минут (сильные пампы)
+        self.elite_pump_pct = self.config['pump_detection']['elite_pump']['min_increase_pct']
+        self.elite_pump_timeframe = self.config['pump_detection']['elite_pump']['max_timeframe_minutes']
+        
         self.scan_interval = 0.05  # 🚀 TURBO MAX++: 0.05 сек (20 сканов/сек!)
         
         
@@ -231,7 +237,12 @@ class RestPumpDetector:
         return {}
     
     def detect_pump(self, symbol: str) -> bool:
-        """Детектировать памп по накопленным данным"""
+        """
+        🚀 ULTRA PUMP DETECTOR v2.0
+        Обнаруживает пампы двух уровней:
+        - FAST: 10%+ за ≤5 минут (ювелирные быстрые пампы)
+        - ELITE: 20%+ за ≤20 минут (сильные пампы)
+        """
         if symbol not in self.price_snapshots:
             return False, 0, 0, ""
         
@@ -240,60 +251,85 @@ class RestPumpDetector:
             return False, 0, 0, ""
         
         now = datetime.now()
-        cutoff = now - timedelta(minutes=self.timeframe_minutes)
-        recent = [s for s in snapshots if datetime.fromtimestamp(s[0]/1000) >= cutoff]
+        current_price = snapshots[-1][1]
         
-        if len(recent) < 2:
-            return False, 0, 0, ""
-        
-        # 🔥 FIX: Находим МИНИМУМ цены (точка старта пампа), а не первую точку окна
-        min_snapshot = min(recent, key=lambda x: x[1])
-        price_start = min_snapshot[1]
-        start_timestamp = min_snapshot[0]
-        
-        peak_snapshot = max(recent, key=lambda x: x[1])
-        price_peak = peak_snapshot[1]
-        peak_time = datetime.fromtimestamp(peak_snapshot[0]/1000)
-        time_since_peak = (now - peak_time).total_seconds() / 60
-        
-        if price_start == 0:
-            return False, 0, 0, ""
-        
-        increase_pct = ((price_peak - price_start) / price_start) * 100
-        
-        # Точное время роста: от МИНИМУМА (старт пампа) до ПИКА
-        peak_timestamp = peak_snapshot[0]
-        time_diff_seconds = (peak_timestamp - start_timestamp) / 1000
-        time_diff_minutes = time_diff_seconds / 60
-        
-        if time_diff_minutes <= 0:
-            time_diff_minutes = 0.1
-
+        # 🔥 ПРОВЕРЯЕМ ОБА ОКНА ВРЕМЕНИ
         is_pump = False
         pump_type = ""
+        best_increase = 0
+        best_time = 0
         
-        # 🔥 FIX: Умная фильтрация "устаревших" пампов
-        # Раньше: если пик был > 1.5 мин назад = игнор (пропускали быстрые сливы!)
-        # Теперь: если пик был давно, НО цена УЖЕ упала от пика — это ХОРОШИЙ вход!
-        current_price = snapshots[-1][1]
-        drop_from_peak_pct = ((price_peak - current_price) / price_peak) * 100
+        # === ПРОВЕРКА 1: FAST PUMP (10%+ за ≤5 мин) ===
+        cutoff_fast = now - timedelta(minutes=self.fast_pump_timeframe)
+        recent_fast = [s for s in snapshots if datetime.fromtimestamp(s[0]/1000) >= cutoff_fast]
         
-        # Пропускаем ТОЛЬКО если: пик был > 5 мин назад И цена НЕ упала (всё ещё на хаях)
-        if time_since_peak > 5.0 and drop_from_peak_pct < 2.0:
-            return False, 0, 0, ""
+        if len(recent_fast) >= 2:
+            min_snap_fast = min(recent_fast, key=lambda x: x[1])
+            max_snap_fast = max(recent_fast, key=lambda x: x[1])
+            
+            price_start_fast = min_snap_fast[1]
+            price_peak_fast = max_snap_fast[1]
+            
+            if price_start_fast > 0:
+                increase_fast = ((price_peak_fast - price_start_fast) / price_start_fast) * 100
+                time_fast = (max_snap_fast[0] - min_snap_fast[0]) / 1000 / 60
+                
+                if time_fast <= 0:
+                    time_fast = 0.1
+                
+                # 🚀 FAST PUMP: 10%+ за ≤5 минут
+                if increase_fast >= self.fast_pump_pct and time_fast <= self.fast_pump_timeframe:
+                    is_pump = True
+                    pump_type = "FAST"
+                    best_increase = increase_fast
+                    best_time = time_fast
         
-        # Если пик был 1-5 мин назад, но цена уже упала > 2% — это валидный сигнал!
-        # (Не отсекаем его, потому что разворот уже начался)
-
-        # 🎯 ELITE: +20% = ПАМП!
-        if increase_pct >= 20.0:
-            is_pump = True
-            pump_type = "ELITE"
-
+        # === ПРОВЕРКА 2: ELITE PUMP (20%+ за ≤20 мин) ===
+        cutoff_elite = now - timedelta(minutes=self.elite_pump_timeframe)
+        recent_elite = [s for s in snapshots if datetime.fromtimestamp(s[0]/1000) >= cutoff_elite]
+        
+        if len(recent_elite) >= 2:
+            min_snap_elite = min(recent_elite, key=lambda x: x[1])
+            max_snap_elite = max(recent_elite, key=lambda x: x[1])
+            
+            price_start_elite = min_snap_elite[1]
+            price_peak_elite = max_snap_elite[1]
+            
+            if price_start_elite > 0:
+                increase_elite = ((price_peak_elite - price_start_elite) / price_start_elite) * 100
+                time_elite = (max_snap_elite[0] - min_snap_elite[0]) / 1000 / 60
+                
+                if time_elite <= 0:
+                    time_elite = 0.1
+                
+                # ⚡ ELITE PUMP: 20%+ за ≤20 минут
+                # 🔥 ВАЖНО: Приоритет FAST! Если уже нашли FAST, не перезаписываем
+                if increase_elite >= self.elite_pump_pct and not is_pump:
+                    is_pump = True
+                    pump_type = "ELITE"
+                    best_increase = increase_elite
+                    best_time = time_elite
+        
+        # 🔥 УМНАЯ ФИЛЬТРАЦИЯ УСТАРЕВШИХ ПАМПОВ
         if is_pump:
-            logger.warning(f"🚀 PUMP DETECTED: {symbol} +{increase_pct:.1f}% за {time_diff_minutes:.1f}мин")
-            return True, increase_pct, time_diff_minutes, pump_type
-
+            # Находим время с момента пика
+            recent = recent_elite if pump_type == "ELITE" else recent_fast
+            peak_snap = max(recent, key=lambda x: x[1])
+            peak_time = datetime.fromtimestamp(peak_snap[0]/1000)
+            time_since_peak = (now - peak_time).total_seconds() / 60
+            peak_price = peak_snap[1]
+            
+            drop_from_peak = ((peak_price - current_price) / peak_price) * 100
+            
+            # Пропускаем ТОЛЬКО если: пик был > 3 мин назад И цена НЕ упала (всё ещё на хаях)
+            # Если цена уже начала падать — это отличный момент для входа!
+            if time_since_peak > 3.0 and drop_from_peak < 1.5:
+                return False, 0, 0, ""
+            
+            emoji = "🚀" if pump_type == "FAST" else "⚡"
+            logger.warning(f"{emoji} {pump_type} PUMP: {symbol} +{best_increase:.1f}% за {best_time:.1f}мин")
+            return True, best_increase, best_time, pump_type
+        
         return False, 0, 0, ""
     
     async def scan_market(self):
@@ -316,28 +352,50 @@ class RestPumpDetector:
             volume = ticker_data["volume"]
             timestamp = ticker_data["timestamp"]
             
-            # 🔥 ОПТИМИЗАЦИЯ ПАМЯТИ: Умный Downsampling (Anchor + Drifting Head)
+            # 🚀 АДАПТИВНОЕ ХРАНЕНИЕ СНИМКОВ v2.0
+            # При быстром росте сохраняем КАЖДЫЙ снимок для точности
+            # При стабильности - редкие снимки (экономия памяти)
             if not self.price_snapshots[symbol]:
+                # Первый снимок - всегда сохраняем
                 self.price_snapshots[symbol].append((timestamp, price, volume))
             elif len(self.price_snapshots[symbol]) == 1:
-                # Если точка всего одна - это старт. Нам нужна вторая, чтобы была история.
-                # Ждем 1 сек и добавляем вторую.
+                # Второй снимок - через 1 сек минимум
                 if (timestamp - self.price_snapshots[symbol][0][0]) > 1000:
                     self.price_snapshots[symbol].append((timestamp, price, volume))
             else:
-                # Если есть история (2+ точки)
-                # snapshots[-2] - это "зафиксированная" историческая точка
-                # snapshots[-1] - это "текущая" плавающая точка
-                prev_historical_time = self.price_snapshots[symbol][-2][0]
+                # 🔥 УМНАЯ ЛОГИКА: проверяем скорость роста
+                last_price = self.price_snapshots[symbol][-1][1]
+                prev_price = self.price_snapshots[symbol][-2][1] if len(self.price_snapshots[symbol]) >= 2 else last_price
                 
-                if (timestamp - prev_historical_time) > 5000:
-                    # Прошло > 5 сек от зафиксированной точки -> фиксируем текущую и создаем новую
-                    self.price_snapshots[symbol].append((timestamp, price, volume))
+                # Скорость роста за последний интервал
+                if prev_price > 0:
+                    price_change_pct = abs((price - last_price) / last_price) * 100
                 else:
-                    # Прошло < 5 сек -> обновляем текущую точку (Drifting Head), чтобы цена была актуальной
+                    price_change_pct = 0
+                
+                # Время с последней зафиксированной точки
+                prev_historical_time = self.price_snapshots[symbol][-2][0]
+                time_since_last = timestamp - prev_historical_time
+                
+                # 🚀 БЫСТРЫЙ РОСТ: Сохраняем КАЖДЫЙ снимок (каждые 0.05-1 сек)
+                if price_change_pct >= 0.5:  # Рост >= 0.5% за интервал
+                    # Всегда добавляем новую точку при быстром движении
+                    self.price_snapshots[symbol].append((timestamp, price, volume))
+                    
+                # ⚡ СРЕДНИЙ РОСТ: Сохраняем каждые 2 секунды
+                elif price_change_pct >= 0.2 and time_since_last > 2000:
+                    self.price_snapshots[symbol].append((timestamp, price, volume))
+                    
+                # 📊 СТАБИЛЬНОСТЬ: Сохраняем каждые 5 секунд (как было)
+                elif time_since_last > 5000:
+                    self.price_snapshots[symbol].append((timestamp, price, volume))
+                    
+                # 🔄 ОБНОВЛЯЕМ ТЕКУЩУЮ ТОЧКУ (Drifting Head)
+                else:
                     self.price_snapshots[symbol][-1] = (timestamp, price, volume)
             
-            cutoff_time = timestamp - (self.timeframe_minutes * 2 * 60 * 1000)
+            # Очистка старых снимков (окно 40 минут для обоих типов пампов)
+            cutoff_time = timestamp - (40 * 60 * 1000)
             self.price_snapshots[symbol] = [
                 s for s in self.price_snapshots[symbol]
                 if s[0] > cutoff_time
@@ -354,7 +412,8 @@ class RestPumpDetector:
                 pump_type = pump_result[3]
                 last_type = self.last_notified_type.get(symbol, "")
                 
-                tier_values = {"": 0, "MICRO_PUMP": 1, "FAST_IMPULSE": 2, "MASSIVE": 3}
+                # 🚀 НОВАЯ TIER СИСТЕМА: FAST > ELITE
+                tier_values = {"": 0, "FAST": 2, "ELITE": 1}
                 current_tier = tier_values.get(pump_type, 0)
                 last_tier = tier_values.get(last_type, 0)
 
@@ -365,7 +424,7 @@ class RestPumpDetector:
                     peak_increase = ((current_peak - last_peak) / last_peak) * 100
                     
                     # Логика повторного уведомления:
-                    # 1. Если TIER повысился (например, Micro -> Fast) -> УВЕДОМЛЯЕМ СРАЗУ
+                    # 1. Если TIER повысился (например, ELITE -> FAST) -> УВЕДОМЛЯЕМ СРАЗУ
                     if current_tier > last_tier:
                          logger.info(f"🆙 {symbol}: Level Up! {last_type} -> {pump_type}")
                          should_notify = True
@@ -377,13 +436,12 @@ class RestPumpDetector:
                     else:
                          should_notify = False
                 
-                # Также проверяем cooldown по времени
+                # 🚀 FAST PUMPS: БЕЗ COOLDOWN - мгновенные уведомления!
+                # ELITE PUMPS: тоже без cooldown (cooldown_minutes = 0)
                 if symbol in self.pump_cooldown and should_notify:
                     time_since_last = (now - self.pump_cooldown[symbol]).total_seconds() / 60
                     if time_since_last < self.cooldown_minutes:
                         should_notify = False
-                
-                # 🚀 INSTANT MODE: Убран signal_cooldown - уведомляем о каждом пампе!
 
                 pumps_found += 1
                 if should_notify:
@@ -397,7 +455,13 @@ class RestPumpDetector:
                 pump_type = pump_result[3]
                 
                 snapshots = self.price_snapshots[symbol]
-                cutoff = now - timedelta(minutes=self.timeframe_minutes)
+                
+                # 🚀 ИСПОЛЬЗУЕМ ПРАВИЛЬНОЕ ОКНО в зависимости от типа пампа
+                if pump_type == "FAST":
+                    cutoff = now - timedelta(minutes=self.fast_pump_timeframe)
+                else:
+                    cutoff = now - timedelta(minutes=self.elite_pump_timeframe)
+                    
                 recent = [s for s in snapshots if datetime.fromtimestamp(s[0]/1000) >= cutoff]
                 
                 if len(recent) < 2:
@@ -436,78 +500,79 @@ class RestPumpDetector:
     
     async def _analyze_with_notification(self, symbol: str, pump_data: Dict, detected_time: datetime):
         """
-        Мониторинг монеты после пампа.
-        НОВАЯ ЛОГИКА:
-        - Для экстремальных пампов (+30%+) - мгновенный сигнал на пике
-        - Для обычных пампов - быстрый мониторинг (3 сек первые 2 мин)
+        🚀 ULTRA FAST ANALYSIS v2.0
+        Мониторинг монеты после пампа с адаптивными параметрами:
+        - FAST пампы: короткий таймаут, низкий порог разворота
+        - ELITE пампы: стандартный мониторинг
         """
         try:
             start_price = pump_data.get('price_start')
             peak_price = pump_data.get('price_peak')
             increase_pct = pump_data.get('increase_pct', 0)
             pump_type = pump_data.get('pump_type', '')
+            actual_time = pump_data.get('actual_time_minutes', 20)
             start_time = datetime.now()
             
-            # 🔥 INSTANT SHORT: Только для БЫСТРЫХ пампов!
-            # Критерий: +20%+ за 5 минут или меньше (или тип MICRO_PUMP/FAST_IMPULSE)
-            actual_time = pump_data.get('actual_time_minutes', 20)
-            is_fast_pump = actual_time <= 5.0 and increase_pct >= 20
-            is_knife = pump_type in ['MICRO_PUMP', 'FAST_IMPULSE']
+            # 🚀 АДАПТИВНЫЕ ПАРАМЕТРЫ В ЗАВИСИМОСТИ ОТ ТИПА ПАМПА
+            if pump_type == "FAST":
+                # FAST: Быстрый таймаут, низкий порог разворота
+                confirmation_timeout = 60   # Ждём всего 1 минуту
+                reversal_threshold = 0.5    # Порог разворота 0.5%
+                check_interval = 0.5        # Проверка каждые 0.5 сек
+                emoji = "🚀"
+            else:
+                # ELITE: Стандартные параметры
+                confirmation_timeout = 120  # 2 минуты
+                reversal_threshold = 1.0    # Порог разворота 1%
+                check_interval = 1.0        # Проверка каждую секунду
+                emoji = "⚡"
             
-            if is_fast_pump or is_knife:
-                if is_knife:
-                    logger.warning(f"🔪 {symbol}: НОЖ +{increase_pct:.1f}% за {actual_time:.1f}мин - жду подтверждение разворота...")
-                else:
-                    logger.warning(f"⚡ {symbol}: БЫСТРЫЙ ПАМП +{increase_pct:.1f}% за {actual_time:.1f}мин - жду подтверждение разворота...")
+            logger.warning(f"{emoji} {symbol}: {pump_type} PUMP +{increase_pct:.1f}% за {actual_time:.1f}мин - жду разворот...")
+            
+            confirmation_start = datetime.now()
+            confirmed = False
+            current_price = peak_price
+            
+            while (datetime.now() - confirmation_start).total_seconds() < confirmation_timeout:
+                await asyncio.sleep(check_interval)
                 
-                # БАЛАНС ТОЧНОСТИ: Ждём разворот до 5 минут (300 сек).
-                # Не бросаем монету быстро, ждём идеального входа.
-                confirmation_timeout = 300 
-                confirmation_start = datetime.now()
-                confirmed = False
-                
-                while (datetime.now() - confirmation_start).total_seconds() < confirmation_timeout:
-                    await asyncio.sleep(1.0)  # Проверка каждую секунду (точно и стабильно)
+                if symbol in self.price_snapshots and self.price_snapshots[symbol]:
+                    current_price = self.price_snapshots[symbol][-1][1]
                     
-                    if symbol in self.price_snapshots and self.price_snapshots[symbol]:
-                        current_price = self.price_snapshots[symbol][-1][1]
-                        
-                        # Обновляем пик если цена выросла ещё
-                        if current_price > peak_price:
-                            peak_price = current_price
-                            pump_data['price_peak'] = peak_price
-                            continue
-                        
-                        # Проверяем откат от пика
-                        drop_from_peak = ((peak_price - current_price) / peak_price) * 100
-                        
-                        if drop_from_peak >= 1.0:  # Откат 1%+ = подтверждение разворота!
-                            logger.warning(f"✅ {symbol}: РАЗВОРОТ ПОДТВЕРЖДЁН! Откат -{drop_from_peak:.1f}% от пика")
-                            confirmed = True
-                            break
-                        elif drop_from_peak >= 0.5:
-                            logger.info(f"⏳ {symbol}: Начало отката -{drop_from_peak:.2f}%, жду 1%+...")
-                
-                if confirmed:
-                    # ТВХ = текущая цена (уже откатилась от пика)
-                    instant_entry = current_price
-                    pump_data['current_price'] = current_price
-                    await self.send_instant_short_signal(symbol, pump_data, instant_entry)
-                    self.signal_cooldown[symbol] = datetime.now()
-                    return
-                else:
-                    logger.warning(f"⚠️ {symbol}: Таймаут ожидания разворота (120 сек), продолжаю обычный мониторинг...")
-                    # Продолжаем в обычном режиме мониторинга
+                    # Обновляем пик если цена выросла ещё
+                    if current_price > peak_price:
+                        peak_price = current_price
+                        pump_data['price_peak'] = peak_price
+                        continue
+                    
+                    # Проверяем откат от пика
+                    drop_from_peak = ((peak_price - current_price) / peak_price) * 100
+                    
+                    if drop_from_peak >= reversal_threshold:
+                        logger.warning(f"✅ {symbol}: РАЗВОРОТ! Откат -{drop_from_peak:.1f}% от пика")
+                        confirmed = True
+                        break
+                    elif drop_from_peak >= reversal_threshold * 0.5:
+                        logger.info(f"⏳ {symbol}: Начало отката -{drop_from_peak:.2f}%, жду {reversal_threshold}%+...")
             
-            logger.info(f"🔄 {symbol}: Мониторинг ТВХ (быстрый режим первые 2 мин)...")
+            if confirmed:
+                # ТВХ = текущая цена (уже откатилась от пика)
+                instant_entry = current_price
+                pump_data['current_price'] = current_price
+                await self.send_instant_short_signal(symbol, pump_data, instant_entry)
+                self.signal_cooldown[symbol] = datetime.now()
+                return
             
-            max_duration = 45 * 60  # 45 минут
+            # Если разворот не подтвердился - короткий мониторинг
+            logger.info(f"🔄 {symbol}: Разворот не подтверждён, продолжаю краткий мониторинг...")
+            
+            max_duration = 15 * 60  # 15 минут (было 45)
             
             while (datetime.now() - start_time).total_seconds() < max_duration:
                 elapsed = (datetime.now() - start_time).total_seconds()
                 
-                # Адаптивный интервал: 3 сек первые 2 мин, потом 10 сек
-                check_interval = 3 if elapsed < 120 else 10
+                # Адаптивный интервал: 2 сек первые 2 мин, потом 5 сек
+                monitor_interval = 2 if elapsed < 120 else 5
                 
                 # 1. Обновляем текущую цену
                 current_price = 0
@@ -516,7 +581,7 @@ class RestPumpDetector:
                      pump_data['current_price'] = current_price
                 
                 if current_price == 0:
-                    await asyncio.sleep(check_interval)
+                    await asyncio.sleep(monitor_interval)
                     continue
 
                 # 2. Пробуем найти сигнал
@@ -536,9 +601,9 @@ class RestPumpDetector:
                     await self.send_no_signal_notification(symbol, pump_data, reason="Цена упала, ТВХ не найдена")
                     return
 
-                await asyncio.sleep(check_interval)
+                await asyncio.sleep(monitor_interval)
             
-            logger.info(f"⌛ {symbol}: Таймаут мониторинга (45 мин).")
+            logger.info(f"⌛ {symbol}: Таймаут мониторинга (15 мин).")
             
         except Exception as e:
             logger.error(f"❌ {symbol}: Ошибка мониторинга: {e}")
