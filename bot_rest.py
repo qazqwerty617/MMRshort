@@ -894,9 +894,11 @@ class RestPumpDetector:
                 quality_label = "🏆 A-TIER"
             elif adjusted_score >= 6:
                 quality_label = "✅ B-TIER"
+            elif adjusted_score >= 5.0:
+                quality_label = "⚠️ C-TIER (Risk)"
             else:
-                # 🚫 C-TIER — не отправляем сигнал
-                logger.info(f"⚠️ {symbol}: C-TIER ({adjusted_score:.1f}/10) — сигнал пропущен")
+                # 🚫 D-TIER — не отправляем сигнал
+                logger.info(f"🚫 {symbol}: D-TIER ({adjusted_score:.1f}/10) — сигнал пропущен (порог 5.0)")
                 return
             
             # 🧠 Корректируем TP по истории монеты
