@@ -478,7 +478,7 @@ class RestPumpDetector:
                     "volume_spike": 1.5,
                     "volume_usd": volume * price,
                     "detected_at": datetime.now(),
-                    "timeframe_minutes": self.timeframe_minutes
+                    "timeframe_minutes": self.fast_pump_timeframe if pump_type == "FAST" else self.elite_pump_timeframe
                 }
                 
                 if should_notify:
