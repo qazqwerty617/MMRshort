@@ -5,7 +5,7 @@ After=network.target
 [Service]
 User=root
 WorkingDirectory=/root/MMR
-ExecStart=/root/MMR/.venv/bin/python bot.py
+ExecStart=/root/MMR/.venv/bin/python bot_rest.py
 Restart=always
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1
