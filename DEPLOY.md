@@ -4,25 +4,24 @@
 
 ## 1. Подготовка (на сервере)
 
-Зайдите на свой сервер через терминал (Putty или cmd).
+Зайдите на свой сервер.
 
-Перейдите в папку с ботом:
+**Если вы ставите бота впервые (папки нет):**
+
+```bash
+cd /root/
+git clone https://github.com/qazqwerty617/MMRshort.git MMR
+cd MMR
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+**Если бот уже установлен:**
 
 ```bash
 cd /root/MMR
-```
-
-*(Или другой путь, где лежит бот)*
-
-Получите последние обновления (конфиг, новые библиотеки):
-
-```bash
 git pull
-```
-
-Обновите библиотеки (мы добавили ML компоненты):
-
-```bash
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
@@ -68,7 +67,7 @@ screen -r mmr
 1. **Скопируйте файл сервиса:**
 
    ```bash
-   cp mmr_bot.service /etc/systemd/system/
+   cp -f mmr_bot.service /etc/systemd/system/
    ```
 
 2. **Обновите конфигурацию systemd:**
