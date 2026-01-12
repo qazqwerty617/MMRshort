@@ -247,7 +247,9 @@ class RestPumpDetector:
             return False, 0, 0, ""
         
         snapshots = self.price_snapshots[symbol]
-        if len(snapshots) < 2:
+        snapshot_count = len(snapshots)
+        
+        if snapshot_count < 2:
             return False, 0, 0, ""
         
         now = datetime.now()
@@ -264,15 +266,19 @@ class RestPumpDetector:
         recent_fast = [s for s in snapshots if datetime.fromtimestamp(s[0]/1000) >= cutoff_fast]
         
         if len(recent_fast) >= 2:
-            min_snap_fast = min(recent_fast, key=lambda x: x[1])
-            max_snap_fast = max(recent_fast, key=lambda x: x[1])
+            # 🔥 ПРАВИЛЬНАЯ ЛОГИКА: рост от НАЧАЛА окна к ПИКУ
+            # Начало окна = самый старый снимок
+            # Пик = максимальная цена в окне
+            price_start_fast = recent_fast[0][1]  # Самый старый снимок (начало окна)
             
-            price_start_fast = min_snap_fast[1]
+            # Находим пик и его время
+            max_snap_fast = max(recent_fast, key=lambda x: x[1])
             price_peak_fast = max_snap_fast[1]
             
             if price_start_fast > 0:
                 increase_fast = ((price_peak_fast - price_start_fast) / price_start_fast) * 100
-                time_fast = (max_snap_fast[0] - min_snap_fast[0]) / 1000 / 60
+                # Время от начала окна до пика
+                time_fast = (max_snap_fast[0] - recent_fast[0][0]) / 1000 / 60
                 
                 if time_fast <= 0:
                     time_fast = 0.1
@@ -283,21 +289,26 @@ class RestPumpDetector:
                     pump_type = "FAST"
                     best_increase = increase_fast
                     best_time = time_fast
+                # 🔍 DEBUG: Логируем близкие значения (для диагностики)
+                elif increase_fast >= self.fast_pump_pct * 0.5:  # Если хотя бы 50% от порога
+                    logger.debug(f"🔍 {symbol}: FAST близко +{increase_fast:.1f}% за {time_fast:.1f}мин (порог {self.fast_pump_pct}%)")
         
         # === ПРОВЕРКА 2: ELITE PUMP (20%+ за ≤20 мин) ===
         cutoff_elite = now - timedelta(minutes=self.elite_pump_timeframe)
         recent_elite = [s for s in snapshots if datetime.fromtimestamp(s[0]/1000) >= cutoff_elite]
         
         if len(recent_elite) >= 2:
-            min_snap_elite = min(recent_elite, key=lambda x: x[1])
-            max_snap_elite = max(recent_elite, key=lambda x: x[1])
+            # 🔥 ПРАВИЛЬНАЯ ЛОГИКА: рост от НАЧАЛА окна к ПИКУ
+            price_start_elite = recent_elite[0][1]  # Самый старый снимок (начало окна)
             
-            price_start_elite = min_snap_elite[1]
+            # Находим пик и его время
+            max_snap_elite = max(recent_elite, key=lambda x: x[1])
             price_peak_elite = max_snap_elite[1]
             
             if price_start_elite > 0:
                 increase_elite = ((price_peak_elite - price_start_elite) / price_start_elite) * 100
-                time_elite = (max_snap_elite[0] - min_snap_elite[0]) / 1000 / 60
+                # Время от начала окна до пика
+                time_elite = (max_snap_elite[0] - recent_elite[0][0]) / 1000 / 60
                 
                 if time_elite <= 0:
                     time_elite = 0.1
@@ -309,6 +320,9 @@ class RestPumpDetector:
                     pump_type = "ELITE"
                     best_increase = increase_elite
                     best_time = time_elite
+                # 🔍 DEBUG: Логируем близкие значения
+                elif increase_elite >= self.elite_pump_pct * 0.5 and not is_pump:
+                    logger.debug(f"🔍 {symbol}: ELITE близко +{increase_elite:.1f}% за {time_elite:.1f}мин (порог {self.elite_pump_pct}%)")
         
         # 🔥 УМНАЯ ФИЛЬТРАЦИЯ УСТАРЕВШИХ ПАМПОВ
         if is_pump:
@@ -495,6 +509,25 @@ class RestPumpDetector:
                     asyncio.create_task(self._analyze_with_notification(symbol, pump_data, now))
                 else:
                     logger.debug(f"🔄 {symbol}: Анализ уже идёт, пропускаем")
+        
+        # 📊 ОТЧЕТ: Топ-3 пары по росту (для диагностики)
+        if self.scan_count % 20 == 0:  # Каждые 20 сканов (примерно раз в минуту при 0.05 сек интервале)
+            top_movers = []
+            for sym, snaps in self.price_snapshots.items():
+                if len(snaps) >= 2:
+                    cutoff_time = datetime.now() - timedelta(minutes=5)
+                    recent = [s for s in snaps if datetime.fromtimestamp(s[0]/1000) >= cutoff_time]
+                    if len(recent) >= 2:
+                        min_price = min(s[1] for s in recent)
+                        max_price = max(s[1] for s in recent)
+                        if min_price > 0:
+                            growth = ((max_price - min_price) / min_price) * 100
+                            top_movers.append((sym, growth, len(snaps)))
+            
+            if top_movers:
+                top_movers.sort(key=lambda x: x[1], reverse=True)
+                top_3 = top_movers[:3]
+                logger.info(f"📈 Топ-3 роста за 5мин: " + " | ".join([f"{s} +{g:.1f}% ({n} снимков)" for s, g, n in top_3]))
         
         logger.info(f"📊 Скан #{self.scan_count}: {pumps_found} пампов | Всего: {self.pump_count} пампов, {self.signal_count} сигналов")
     
@@ -1444,6 +1477,10 @@ _Бот запущен и готов к работе!_ 🚀
     async def broadcast_message(self, text: str, parse_mode='Markdown', reply_markup=None, disable_web_page_preview=True):
         """Отправить сообщение в группу (в указанную тему)"""
         try:
+            if not self.app:
+                logger.warning("⚠️ Telegram бот еще не инициализирован, сообщение не отправлено")
+                return
+                
             await self.app.bot.send_message(
                 chat_id=self.chat_id,
                 message_thread_id=self.topic_id,
@@ -1452,6 +1489,7 @@ _Бот запущен и готов к работе!_ 🚀
                 reply_markup=reply_markup,
                 disable_web_page_preview=disable_web_page_preview
             )
+            logger.info(f"✅ Сообщение отправлено в Telegram (канал: {self.chat_id}, тема: {self.topic_id})")
         except Exception as e:
             logger.error(f"Ошибка отправки в группу: {e}")
     
