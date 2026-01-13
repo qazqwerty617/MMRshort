@@ -589,12 +589,11 @@ class RestPumpDetector:
                         logger.info(f"⏳ {symbol}: Начало отката -{drop_from_peak:.2f}%, жду {reversal_threshold}%+...")
             
             if confirmed:
-                # ТВХ = текущая цена (уже откатилась от пика)
-                instant_entry = current_price
-                pump_data['current_price'] = current_price
-                await self.send_instant_short_signal(symbol, pump_data, instant_entry)
-                self.signal_cooldown[symbol] = datetime.now()
-                return
+                # 🔥 ОТКЛЮЧИЛИ INSTANT SHORT - используем полноценный анализ!
+                # Разворот подтвержден, но НЕ отправляем сигнал моментально.
+                # Ждем полного анализа через analyze_and_generate_signal ниже.
+                logger.info(f"✅ {symbol}: Разворот подтвержден, перехожу к полному анализу...")
+                # НЕ возвращаемся, продолжаем мониторинг с полным анализом
             
             # Если разворот не подтвердился - короткий мониторинг
             logger.info(f"🔄 {symbol}: Разворот не подтверждён, продолжаю краткий мониторинг...")
@@ -616,6 +615,13 @@ class RestPumpDetector:
                 if current_price == 0:
                     await asyncio.sleep(monitor_interval)
                     continue
+
+                # 🔒 ПРОВЕРКА COOLDOWN: Если уже отправили сигнал - выходим
+                if symbol in self.signal_cooldown:
+                    time_since_signal = (datetime.now() - self.signal_cooldown[symbol]).total_seconds() / 60
+                    if time_since_signal < 20:  # Cooldown 20 минут
+                        logger.debug(f"🔇 {symbol}: Сигнал уже отправлен {time_since_signal:.1f} мин назад, пропускаю")
+                        return
 
                 # 2. Пробуем найти сигнал
                 signal = await self.analyze_and_generate_signal(symbol, pump_data)
@@ -1058,6 +1064,14 @@ _Analyzing..._
     
     async def analyze_and_generate_signal(self, symbol: str, pump_data: Dict):
         """Анализ и генерация сигнала"""
+        
+        # 🔒 КРИТИЧЕСКАЯ ПРОВЕРКА: Если уже отправили сигнал - не генерируем новый!
+        if symbol in self.signal_cooldown:
+            time_since_signal = (datetime.now() - self.signal_cooldown[symbol]).total_seconds() / 60
+            if time_since_signal < 20:  # Cooldown 20 минут
+                logger.debug(f"🔇 {symbol}: Сигнал уже отправлен {time_since_signal:.1f} мин назад, возврат None")
+                return None
+        
         logger.info(f"🔄 {symbol}: Анализ для SHORT...")
         
         try:
@@ -1138,6 +1152,9 @@ _Analyzing..._
             )
             
             if signal:
+                # 🔒 УСТАНОВИТЬ COOLDOWN ДО ОТПРАВКИ (защита от дублей)
+                self.signal_cooldown[symbol] = datetime.now()
+                
                 self.signal_count += 1
                 logger.info(f"🎯 Сигнал #{self.signal_count} для {symbol}")
                 

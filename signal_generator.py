@@ -179,6 +179,19 @@ class SignalGenerator:
         if is_new_listing:
             logger.warning(f"🆕 {symbol}: НОВАЯ МОНЕТА (<7 дней, возраст: {coin_age}д) ⚠️ ПОВЫШЕННЫЙ РИСК")
         
+        # 7.5. 🦄 DEX анализ (опционально)
+        dex_data = None
+        dex_score = 0.0
+        dex_spread_data = None
+        try:
+            dex_result = await self.dex_analyzer.analyze(symbol)
+            if dex_result:
+                dex_data = dex_result.get('dex_data')
+                dex_score = dex_result.get('dex_score', 0)
+                dex_spread_data = dex_result.get('spread_data')
+        except Exception as dex_err:
+            logger.debug(f"DEX analysis skipped: {dex_err}")
+        
         # 8. 🎯 УПРОЩЁННЫЕ ВЕСА (4 фактора)
         weights = {
             'rsi_level': 0.30,      # RSI — ключевой
@@ -247,11 +260,25 @@ class SignalGenerator:
         
         logger.info(f"📊 {symbol}: Score = {quality_score:.2f} | RSI={rsi:.0f} Vol={volume_score:.1f} OB={orderbook_score:.1f} OI={oi_score:.1f}")
         
-        # 🎯 ELITE MODE: Только лучшие входы на пике!
+        # 🔥 ELITE MODE: ОЧЕНЬ СТРОГИЕ ФИЛЬТРЫ!
         MIN_SCORE_FOR_SIGNAL = 7.0  # Только топ сигналы
+        MIN_RSI_FOR_ELITE = 72  # RSI должен быть очень высоким
+        MIN_VOLUME_DROP_FOR_ELITE = 40  # Объем должен упасть минимум на 40%
         
+        # 🔒 ПРОВЕРКА 1: RSI
+        if rsi < MIN_RSI_FOR_ELITE:
+            logger.info(f"❌ {symbol}: RSI {rsi:.1f} < {MIN_RSI_FOR_ELITE} — недостаточная перекупленность")
+            return None
+        
+        # 🔒 ПРОВЕРКА 2: ПАДЕНИЕ ОБЪЕМА
+        volume_drop_pct = volume_drop.get('volume_drop_pct', 0) if volume_drop else 0
+        if volume_drop_pct < MIN_VOLUME_DROP_FOR_ELITE:
+            logger.info(f"❌ {symbol}: Объем упал только на {volume_drop_pct:.1f}% < {MIN_VOLUME_DROP_FOR_ELITE}% — недостаточно")
+            return None
+        
+        # 🔒 ПРОВЕРКА 3: QUALITY SCORE
         if quality_score < MIN_SCORE_FOR_SIGNAL:
-            logger.info(f"⚠️ {symbol}: Score {quality_score:.1f} < 7.0 — пропускаем")
+            logger.info(f"⚠️ {symbol}: Score {quality_score:.1f} < {MIN_SCORE_FOR_SIGNAL} — пропускаем")
             return None
         
         logger.warning(f"🔥 {symbol}: ELITE SIGNAL — Score {quality_score:.1f}/10")
