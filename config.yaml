@@ -2,7 +2,7 @@
 
 # ============ НАСТРОЙКИ TELEGRAM ============
 telegram:
-  bot_token: "8315354749:AAFcU0LzGUkMCe2Qodl2w9DpIuP1oGZv-vU"
+  bot_token: "8194646735:AAErkh3rPboqpxgPRVItRCjCOW_rDW5BDjw"
   chat_id: "-1003582014728"  # ID группы
   topic_id: 2  # ID темы (треда) в группе
   message_format: "markdown"
